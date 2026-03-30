@@ -136,34 +136,39 @@ def _fused_merge_4bit_vec_kernel(
 
 def fused_decompress_chunk(chunk) -> torch.Tensor:
     """
-    Single-pass fused decompression using precomputed cumsum.
-    No torch.cumsum, no scatter, no .item().
+    Single-pass fused decompression.
+    Computes cumsum on-the-fly (not stored in chunk to save memory).
     """
     device = chunk.repr_mask.device
     batch, heads, seq, hd = chunk.orig_shape
     bph = chunk.blocks_per_head
     total_blocks = batch * heads * bph
-    
+
     assert total_blocks * 8 == batch * heads * seq * hd
-    
+
+    # Compute acceleration metadata on-the-fly
+    mask_int = chunk.repr_mask.to(torch.int32).contiguous()
+    repr_cumsum = (torch.cumsum(mask_int, dim=0) - mask_int).to(torch.int32)
+    fb_cumsum = (torch.cumsum(1 - mask_int, dim=0) - (1 - mask_int)).to(torch.int32)
+
     out = torch.empty(total_blocks * 8, dtype=torch.float16, device=device)
-    
+
     BLOCK = 128
     grid = ((total_blocks + BLOCK - 1) // BLOCK,)
-    
+
     _fused_merge_4bit_vec_kernel[grid](
         chunk.packed.contiguous().view(-1),
         chunk.fallback.contiguous().view(-1),
-        chunk.repr_mask.to(torch.int32).contiguous(),
+        mask_int,
         chunk.scales,
-        chunk.repr_cumsum,
-        chunk.fb_cumsum,
+        repr_cumsum,
+        fb_cumsum,
         out,
         total_blocks,
         bph=bph,
         BLOCK=BLOCK,
     )
-    
+
     return out.reshape(batch, heads, seq, hd)
 
 
