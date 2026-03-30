@@ -57,6 +57,10 @@ class CompressedChunk:
     num_blocks: int
     n_repr: int
     n_oor: int
+    repr_indices: torch.Tensor = None    # (n_repr,) int32 — global block indices
+    repr_head_ids: torch.Tensor = None   # (n_repr,) int32 — head index per packed vector
+    repr_cumsum: torch.Tensor = None     # (total_blocks,) int32 — exclusive prefix sum of repr
+    fb_cumsum: torch.Tensor = None       # (total_blocks,) int32 — exclusive prefix sum of fallback
 
 
 # ============================================================
@@ -253,7 +257,15 @@ class CompressedKVCache(DynamicCache):
         self.total_blocks += n_heads * bph
         self.total_repr += total_repr
         self.total_oor += total_oor
-        
+
+        # Precompute indices for Triton decompress (avoids torch.nonzero at decode time)
+        full_mask = torch.cat(all_masks, dim=0)
+        repr_indices = torch.nonzero(full_mask).flatten().to(torch.int32)
+        repr_head_ids = (repr_indices // bph).to(torch.int32)
+        mask_int = full_mask.to(torch.int32)
+        repr_cumsum = (torch.cumsum(mask_int, dim=0) - mask_int).to(torch.int32)
+        fb_cumsum = (torch.cumsum(1 - mask_int, dim=0) - (1 - mask_int)).to(torch.int32)
+
         chunk = CompressedChunk(
             packed=torch.cat(all_packed, dim=0) if all_packed else
                    torch.zeros(0, self.bits, dtype=torch.uint8, device=device),
@@ -267,6 +279,10 @@ class CompressedKVCache(DynamicCache):
             num_blocks=n_heads * bph,
             n_repr=total_repr,
             n_oor=total_oor,
+            repr_indices=repr_indices,
+            repr_head_ids=repr_head_ids,
+            repr_cumsum=repr_cumsum,
+            fb_cumsum=fb_cumsum,
         )
         
         decompressed_out = decompressed.reshape(tensor.shape).to(torch.float16)
