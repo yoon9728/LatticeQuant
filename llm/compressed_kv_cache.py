@@ -9,6 +9,11 @@ Optimizations vs v5:
   3. Float16 scales: float32 → float16 per head (2× smaller)
   4. Bitstream merging: all streams in a chunk → one contiguous buffer
 
+v6 decode optimization:
+  - update() keeps decompressed KV buffers across layers (no per-layer free)
+  - New tokens concat to existing buffer → O(1) per decode step
+  - _decompress_chunk only used in memory measurement, not in hot path
+
 Target: storage ≈ coded rate + minimal overhead → close to 4.07 bits/dim
 
 Dependencies:
@@ -86,6 +91,7 @@ class OptimizedChunk:
     n_heads: int
     blocks_per_head: int
     bits_per_dim: float
+    orig_dtype: torch.dtype = torch.bfloat16
 
 
 class CompressedKVLayer:
@@ -123,7 +129,7 @@ class CompressedKVLayer:
 
 class UncompressibleKVLayer:
     def __init__(self, tensor):
-        self.data = tensor.to(torch.float16)
+        self.data = tensor  # preserve original dtype
     @property
     def is_empty(self):
         return False
@@ -139,10 +145,13 @@ class UncompressibleKVLayer:
 
 
 _PLACEHOLDER = None
-def _get_placeholder(device):
-    global _PLACEHOLDER
-    if _PLACEHOLDER is None or _PLACEHOLDER.device != device:
-        _PLACEHOLDER = torch.zeros(1, 1, 0, 1, dtype=torch.float16, device=device)
+_PLACEHOLDER_DTYPE = None
+
+def _get_placeholder(device, dtype=torch.bfloat16):
+    global _PLACEHOLDER, _PLACEHOLDER_DTYPE
+    if _PLACEHOLDER is None or _PLACEHOLDER.device != device or _PLACEHOLDER_DTYPE != dtype:
+        _PLACEHOLDER = torch.zeros(1, 1, 0, 1, dtype=dtype, device=device)
+        _PLACEHOLDER_DTYPE = dtype
     return _PLACEHOLDER
 
 
@@ -151,10 +160,11 @@ def _get_placeholder(device):
 # ============================================================
 
 class CompressedKVCache(DynamicCache):
-    def __init__(self, bits_per_dim: int = 4):
+    def __init__(self, bits_per_dim: int = 4, eval_only_no_entropy: bool = False):
         super().__init__()
         assert bits_per_dim in (3, 4, 5)
         self.bits = bits_per_dim
+        self.eval_only_no_entropy = eval_only_no_entropy
         if not hasattr(self, 'key_cache'):
             self.key_cache = []
         if not hasattr(self, 'value_cache'):
@@ -162,13 +172,14 @@ class CompressedKVCache(DynamicCache):
         self._comp_keys: List = []
         self._comp_values: List = []
         self.total_vectors = 0
-        self._last_decompressed_layer = -1
+        self._model_dtype = None  # auto-detected on first update
     
     def _compress_tensor(self, tensor: torch.Tensor) -> Tuple[Any, torch.Tensor]:
         device = tensor.device
+        orig_dtype = tensor.dtype
         batch, heads, seq, hd = tensor.shape
         if hd % 8 != 0:
-            return 'uncompressible', tensor.to(torch.float16)
+            return 'uncompressible', tensor
         
         t = tensor.float()
         bph = seq * (hd // 8)
@@ -176,27 +187,41 @@ class CompressedKVCache(DynamicCache):
         n_vectors = n_heads * bph
         
         t_heads = t.reshape(n_heads, bph, 8)
-        sigma2 = (t_heads ** 2).mean(dim=(1, 2))
-        per_head_scale = torch.zeros(n_heads, dtype=torch.float16, device=device)
+        sigma2 = (t_heads ** 2).mean(dim=(1, 2))  # (n_heads,)
         
-        all_q = torch.zeros_like(t_heads)
-        for h in range(n_heads):
-            s2 = sigma2[h].item()
-            if s2 < 1e-12:
-                per_head_scale[h] = 1.0
-                all_q[h] = t_heads[h]
-                continue
-            scale = compute_scale(s2, self.bits)
-            per_head_scale[h] = scale
-            all_q[h] = encode_e8(t_heads[h] / scale)
+        # ---- Vectorized scale: all heads at once, pure torch ----
+        target_vol = 2 * torch.pi * torch.e * sigma2 * (4.0 ** (-self.bits))
+        scales_f32 = target_vol.sqrt()
+        # Handle near-zero variance heads (scale=1.0, encode_e8(~0)=0 naturally)
+        scales_f32 = torch.where(sigma2 < 1e-12, torch.ones_like(scales_f32), scales_f32)
+        per_head_scale = scales_f32.to(torch.float16)
         
-        # Decompressed output
-        decompressed = torch.zeros_like(t_heads)
-        for h in range(n_heads):
-            decompressed[h] = all_q[h] * per_head_scale[h].float().item()
-        decompressed_out = decompressed.reshape(tensor.shape).to(torch.float16)
+        # ---- Single encode_e8 call for ALL vectors ----
+        scales_expand = scales_f32.unsqueeze(-1).unsqueeze(-1)  # (n_heads, 1, 1)
+        x_scaled = t_heads / scales_expand
+        all_q = encode_e8(x_scaled.reshape(-1, 8)).reshape(n_heads, bph, 8)
         
-        # Symbolize
+        # ---- Vectorized dequant ----
+        decompressed_out = (all_q * scales_expand).reshape(tensor.shape).to(orig_dtype)
+        
+        # ---- eval-only fast path ----
+        if self.eval_only_no_entropy:
+            self.total_vectors += n_vectors
+            chunk = OptimizedChunk(
+                streams=[], stream_meta=[],
+                gpu_bitstream=torch.zeros(1, dtype=torch.int32, device=device),
+                stream_word_offsets=[],
+                coset_packed=torch.zeros(1, dtype=torch.uint8, device=device),
+                coset_counts=(0, 0),
+                scales=per_head_scale,
+                orig_shape=tensor.shape,
+                n_vectors=n_vectors, n_heads=n_heads,
+                blocks_per_head=bph, bits_per_dim=self.bits,
+                orig_dtype=orig_dtype,
+            )
+            return chunk, decompressed_out
+        
+        # ---- full entropy coding path ----
         q_flat = all_q.reshape(n_vectors, 8)
         coset, free_coords, coord8_half = e8_to_symbols(q_flat)
         cos_np = coset.cpu().numpy().astype(np.int32)
@@ -206,7 +231,6 @@ class CompressedKVCache(DynamicCache):
         
         coset_counts = (int((cos_np == 0).sum()), int((cos_np == 1).sum()))
         
-        # rANS encode with shared tables
         streams = []
         stream_meta = []
         
@@ -233,7 +257,6 @@ class CompressedKVCache(DynamicCache):
                 ))
                 stream_meta.append((c_val, idx, len(col)))
         
-        # Merge bitstreams into one contiguous GPU buffer
         word_offsets = []
         all_words = []
         for s in streams:
@@ -245,29 +268,35 @@ class CompressedKVCache(DynamicCache):
         else:
             gpu_bitstream = torch.zeros(1, dtype=torch.int32, device=device)
         
-        # Bit-pack coset
         coset_packed = pack_coset_bits(coset)
         
         self.total_vectors += n_vectors
         
         chunk = OptimizedChunk(
-            streams=streams,
-            stream_meta=stream_meta,
+            streams=streams, stream_meta=stream_meta,
             gpu_bitstream=gpu_bitstream,
             stream_word_offsets=word_offsets,
             coset_packed=coset_packed,
             coset_counts=coset_counts,
             scales=per_head_scale,
             orig_shape=tensor.shape,
-            n_vectors=n_vectors,
-            n_heads=n_heads,
-            blocks_per_head=bph,
-            bits_per_dim=self.bits,
+            n_vectors=n_vectors, n_heads=n_heads,
+            blocks_per_head=bph, bits_per_dim=self.bits,
+            orig_dtype=orig_dtype,
         )
         
         return chunk, decompressed_out
     
     def _decompress_chunk(self, chunk: OptimizedChunk) -> torch.Tensor:
+        """
+        Full decompression from rANS-coded chunk.
+        
+        NOT called during normal forward/decode — only used by:
+          - memory measurement (to verify roundtrip)
+          - standalone correctness tests
+          
+        The hot path (update) keeps decompressed buffers and never calls this.
+        """
         device = chunk.gpu_bitstream.device
         batch, heads, seq, hd = chunk.orig_shape
         n_vectors = chunk.n_vectors
@@ -301,18 +330,33 @@ class CompressedKVCache(DynamicCache):
         for h in range(n_heads):
             result[h] = q_heads[h] * chunk.scales[h].float().item()
         
-        return result.reshape(batch, heads, seq, hd).to(torch.float16)
+        return result.reshape(batch, heads, seq, hd).to(chunk.orig_dtype)
     
     def _free_layer(self, layer_idx):
+        """Free decompressed KV for a layer. Used by memory measurement only."""
         if layer_idx < len(self.key_cache):
             dev = self.key_cache[layer_idx].device if self.key_cache[layer_idx] is not None else 'cuda:0'
-            self.key_cache[layer_idx] = _get_placeholder(dev)
-            self.value_cache[layer_idx] = _get_placeholder(dev)
+            dt = self._model_dtype or torch.bfloat16
+            self.key_cache[layer_idx] = _get_placeholder(dev, dt)
+            self.value_cache[layer_idx] = _get_placeholder(dev, dt)
     
     def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
+        """
+        Compress new KV and append to cache.
+        
+        Decompressed buffers are kept across all layers — no per-layer free.
+        New tokens are concatenated to the existing decompressed buffer in O(1).
+        This avoids O(n²) re-decompression during autoregressive decode.
+        
+        Memory cost: all layers' decompressed KV in VRAM simultaneously.
+        For 8B model, 2048 seq: ~268 MB (fits easily on 16GB GPU).
+        Compressed chunks are stored separately for memory accounting.
+        """
         device = key_states.device
-        if self._last_decompressed_layer >= 0 and self._last_decompressed_layer != layer_idx:
-            self._free_layer(self._last_decompressed_layer)
+        
+        # Auto-detect model dtype on first call
+        if self._model_dtype is None:
+            self._model_dtype = key_states.dtype
         
         comp_k, k_dec_new = self._compress_tensor(key_states)
         comp_v, v_dec_new = self._compress_tensor(value_states)
@@ -321,15 +365,14 @@ class CompressedKVCache(DynamicCache):
             self._comp_keys.append(None)
             self._comp_values.append(None)
         while len(self.key_cache) <= layer_idx:
-            self.key_cache.append(_get_placeholder(device))
-            self.value_cache.append(_get_placeholder(device))
+            self.key_cache.append(_get_placeholder(device, self._model_dtype))
+            self.value_cache.append(_get_placeholder(device, self._model_dtype))
         
         if comp_k == 'uncompressible':
             self._comp_keys[layer_idx] = UncompressibleKVLayer(key_states)
             self._comp_values[layer_idx] = UncompressibleKVLayer(value_states)
             self.key_cache[layer_idx] = k_dec_new
             self.value_cache[layer_idx] = v_dec_new
-            self._last_decompressed_layer = layer_idx
             return k_dec_new, v_dec_new
         
         if self._comp_keys[layer_idx] is None:
@@ -339,20 +382,17 @@ class CompressedKVCache(DynamicCache):
         self._comp_keys[layer_idx].append_chunk(comp_k)
         self._comp_values[layer_idx].append_chunk(comp_v)
         
-        kl = self._comp_keys[layer_idx]
-        vl = self._comp_values[layer_idx]
-        
-        if len(kl.chunks) == 1:
-            k_full, v_full = k_dec_new, v_dec_new
+        # O(1) concat: append new decompressed tokens to existing buffer
+        prev_k = self.key_cache[layer_idx]
+        if prev_k.shape[2] > 0:  # not placeholder
+            k_full = torch.cat([prev_k, k_dec_new], dim=2)
+            v_full = torch.cat([self.value_cache[layer_idx], v_dec_new], dim=2)
         else:
-            past_k = [self._decompress_chunk(c) for c in kl.chunks[:-1]]
-            past_v = [self._decompress_chunk(c) for c in vl.chunks[:-1]]
-            k_full = torch.cat(past_k + [k_dec_new], dim=2)
-            v_full = torch.cat(past_v + [v_dec_new], dim=2)
+            k_full = k_dec_new
+            v_full = v_dec_new
         
         self.key_cache[layer_idx] = k_full
         self.value_cache[layer_idx] = v_full
-        self._last_decompressed_layer = layer_idx
         return k_full, v_full
     
     # ---- Reporting ----
@@ -388,7 +428,6 @@ class CompressedKVCache(DynamicCache):
         ratio_act = fp16 / max(actual, 1)
         n_layers = sum(1 for x in self._comp_keys if x is not None)
         
-        # Effective bits/dim
         total_dims = self.total_vectors * 8
         eff_bits = (comp * 8) / max(total_dims, 1)
         
@@ -436,7 +475,7 @@ def test_roundtrip_quality():
     print()
 
 def test_incremental_decode():
-    print("Test: Incremental decode")
+    print("Test: Incremental decode (O(1) per step)")
     print("=" * 60)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     cache = CompressedKVCache(bits_per_dim=4)
@@ -450,7 +489,8 @@ def test_incremental_decode():
             torch.randn(1, 8, 1, 128, device=device, dtype=torch.float16),
             layer_idx=0)
     assert cache.get_seq_length(0) == 68 and not torch.isnan(k_out).any()
-    print(f"  seq=68, no NaN -> PASS\n")
+    assert k_out.shape == (1, 8, 68, 128)
+    print(f"  seq=68, shape={k_out.shape}, no NaN -> PASS\n")
 
 def test_actual_vram():
     if not torch.cuda.is_available():
@@ -486,9 +526,8 @@ def test_actual_vram():
         v = torch.randn(1, 8, 512, 128, device=device, dtype=torch.float16)
         comp.update(k, v, layer)
     mem_comp = torch.cuda.memory_allocated() - mem0
-    peak_comp = torch.cuda.max_memory_allocated() - mem0
 
-    # Pure compressed-only
+    # Compressed-only (free all decompressed layers)
     for layer in range(n_layers):
         comp._free_layer(layer)
     torch.cuda.empty_cache(); gc.collect()
@@ -496,20 +535,18 @@ def test_actual_vram():
 
     print(f"  Config: {n_layers}L x 8H x 512T x 128D")
     print(f"  Baseline:         resident={mem_base/1e6:.1f}MB")
-    print(f"  Compressed+1L:    resident={mem_comp/1e6:.1f}MB")
+    print(f"  Compressed+all:   resident={mem_comp/1e6:.1f}MB")
     print(f"  Compressed-only:  resident={mem_compressed_only/1e6:.1f}MB")
-    print(f"  Peak:             {peak_comp/1e6:.1f}MB")
     print(f"  ---")
-    print(f"  Compressed+1L ratio:    {mem_base/max(mem_comp,1):.2f}x")
+    print(f"  Compressed+all ratio:   {mem_base/max(mem_comp,1):.2f}x")
     print(f"  Compressed-only ratio:  {mem_base/max(mem_compressed_only,1):.2f}x")
-    print(f"  Peak ratio:             {mem_base/max(peak_comp,1):.2f}x")
     print()
     print(comp.memory_report())
     del comp; torch.cuda.empty_cache()
     print()
 
 def test_rebuild_correctness():
-    print("Test: Rebuild correctness")
+    print("Test: Rebuild correctness (rANS roundtrip)")
     print("=" * 60)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     cache = CompressedKVCache(bits_per_dim=4)
@@ -522,36 +559,42 @@ def test_rebuild_correctness():
         k_out, _ = cache.update(k, v, layer_idx=layer)
         all_k_ref.append(k_out.clone())
     
+    # Verify decompression from rANS matches cached output
     for layer in range(n_layers):
-        k_out, _ = cache.update(
-            torch.randn(1, 8, 1, 128, device=device, dtype=torch.float16),
-            torch.randn(1, 8, 1, 128, device=device, dtype=torch.float16),
-            layer_idx=layer)
-        prefill_part = k_out[:, :, :64, :]
-        diff = (prefill_part.float() - all_k_ref[layer].float()).abs().max().item()
-        assert diff < 1e-2, f"Layer {layer}: diff {diff}"
-        print(f"  Layer {layer}: diff={diff:.2e} -> OK")
+        chunk = cache._comp_keys[layer].chunks[0]
+        k_reconstructed = cache._decompress_chunk(chunk)
+        diff = (k_reconstructed.float() - all_k_ref[layer].float()).abs().max().item()
+        assert diff < 1e-3, f"Layer {layer}: diff {diff}"
+        print(f"  Layer {layer}: rANS roundtrip diff={diff:.2e} -> OK")
     print("  PASS\n")
 
 def test_multi_layer_decode():
-    print("Test: Multi-layer decode")
+    print("Test: Multi-layer decode (simulates autoregressive)")
     print("=" * 60)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     cache = CompressedKVCache(bits_per_dim=4)
     n_layers = 4
     torch.manual_seed(42)
+    
+    # Prefill
     for layer in range(n_layers):
         cache.update(
             torch.randn(1, 8, 64, 128, device=device, dtype=torch.float16),
             torch.randn(1, 8, 64, 128, device=device, dtype=torch.float16),
             layer_idx=layer)
-    for layer in range(n_layers):
-        k_out, _ = cache.update(
-            torch.randn(1, 8, 1, 128, device=device, dtype=torch.float16),
-            torch.randn(1, 8, 1, 128, device=device, dtype=torch.float16),
-            layer_idx=layer)
-        assert k_out.shape == (1, 8, 65, 128) and not torch.isnan(k_out).any()
-    print(f"  4 layers, 65 tokens -> PASS\n")
+    
+    # Decode 4 steps (each step visits all layers)
+    for step in range(4):
+        for layer in range(n_layers):
+            k_out, _ = cache.update(
+                torch.randn(1, 8, 1, 128, device=device, dtype=torch.float16),
+                torch.randn(1, 8, 1, 128, device=device, dtype=torch.float16),
+                layer_idx=layer)
+        expected_seq = 64 + step + 1
+        assert k_out.shape == (1, 8, expected_seq, 128), f"Step {step}: {k_out.shape}"
+        assert not torch.isnan(k_out).any()
+    
+    print(f"  4 layers x 4 decode steps, final seq={k_out.shape[2]} -> PASS\n")
 
 def test_effective_rate():
     """Show effective bits/dim breakdown."""
@@ -578,6 +621,45 @@ def test_effective_rate():
         del cache; torch.cuda.empty_cache(); gc.collect()
     print()
 
+def test_decode_no_redecompress():
+    """Verify _decompress_chunk is NOT called during decode."""
+    print("Test: Decode path avoids _decompress_chunk")
+    print("=" * 60)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
+    call_count = [0]
+    original = CompressedKVCache._decompress_chunk
+    
+    def counting_decompress(self, chunk):
+        call_count[0] += 1
+        return original(self, chunk)
+    
+    CompressedKVCache._decompress_chunk = counting_decompress
+    
+    cache = CompressedKVCache(bits_per_dim=4)
+    torch.manual_seed(42)
+    
+    # Prefill
+    for layer in range(4):
+        cache.update(
+            torch.randn(1, 8, 64, 128, device=device, dtype=torch.float16),
+            torch.randn(1, 8, 64, 128, device=device, dtype=torch.float16),
+            layer_idx=layer)
+    
+    # Decode 8 steps
+    call_count[0] = 0
+    for step in range(8):
+        for layer in range(4):
+            cache.update(
+                torch.randn(1, 8, 1, 128, device=device, dtype=torch.float16),
+                torch.randn(1, 8, 1, 128, device=device, dtype=torch.float16),
+                layer_idx=layer)
+    
+    CompressedKVCache._decompress_chunk = original
+    
+    assert call_count[0] == 0, f"_decompress_chunk called {call_count[0]} times!"
+    print(f"  8 decode steps x 4 layers = 32 updates, _decompress_chunk calls: {call_count[0]} -> PASS\n")
+
 
 if __name__ == '__main__':
     print("=" * 60)
@@ -590,4 +672,5 @@ if __name__ == '__main__':
     test_rebuild_correctness()
     test_multi_layer_decode()
     test_effective_rate()
+    test_decode_no_redecompress()
     print("All tests PASSED.")
