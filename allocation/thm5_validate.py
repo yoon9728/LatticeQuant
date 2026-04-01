@@ -1,6 +1,6 @@
 """
-LatticeQuant v3 — Theorem 5 Synthetic Consistency Check (P9)
-==============================================================
+Theorem 5 Consistency Check
+=============================
 Verifies internal consistency of the oracle spectral gap
 decomposition (Theorem 5):
 
@@ -228,7 +228,7 @@ def run_factor_sweep(T=32, d=16, rate=4.0, n_sweep=20, seed=42):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='LatticeQuant v3: Theorem 5 synthetic consistency check')
+        description='Theorem 5 synthetic consistency check')
     parser.add_argument('--T', type=int, default=32)
     parser.add_argument('--d', type=int, default=16)
     parser.add_argument('--rate', type=float, default=4.0)

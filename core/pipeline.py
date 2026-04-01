@@ -1,6 +1,6 @@
 """
-LatticeQuant Phase 4: Full Pipeline
-=====================================
+Quantization Pipeline
+======================
 d-dim vector → RHT → 8-dim blocks → E₈ quantize → parity-aware entropy code → bitstream
 bitstream → decode → inverse RHT → reconstructed vector
 
@@ -251,7 +251,7 @@ def test_pipeline():
     print(f"Device: {device}")
     print()
 
-    print("Phase 4: Full Pipeline Test")
+    print("Full Pipeline Test")
     print("=" * 80)
 
     # Test dimensions (must be divisible by 8 and power of 2 for RHT)

@@ -1,6 +1,6 @@
 """
-LatticeQuant v3 — Theorem 3 Evaluation: Uniform vs Optimal PPL (P6)
-=====================================================================
+Uniform vs Optimal PPL Evaluation
+===================================
 Compares perplexity under uniform bitrate vs attention-aware optimal
 allocation from Theorem 3's water-filling solution.
 
@@ -257,7 +257,7 @@ def schedule_summary(schedule: List[Dict[str, int]]) -> str:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='LatticeQuant v3: Theorem 3 evaluation (uniform vs optimal PPL)')
+        description='Theorem 3 evaluation (uniform vs optimal PPL)')
     parser.add_argument('--model', type=str, default='meta-llama/Llama-3.1-8B')
 
     # Option A: pre-computed allocation

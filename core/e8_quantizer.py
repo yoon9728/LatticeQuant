@@ -1,7 +1,7 @@
 """
-LatticeQuant Phase 1: E₈ Core Quantizer
-========================================
-E₈ nearest-neighbor encoding + Gaussian sanity check.
+E₈ Lattice Quantizer
+=====================
+E₈ nearest-neighbor encoding + Gaussian validation.
 
 E₈ = D₈ ∪ (D₈ + [1/2]^8), where D₈ = {x ∈ Z^8 : sum(x) even}.
 Nearest-neighbor decoding via Conway-Sloane algorithm.

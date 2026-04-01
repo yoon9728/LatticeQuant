@@ -1,6 +1,6 @@
 """
-LatticeQuant v3 — Theorem 4 Implementation Consistency Check (P8)
-==================================================================
+Theorem 4 Consistency Check
+=============================
 Confirms the lattice gap carry-over identity end-to-end:
 
     Replacing E₈ (c ≈ 1.224) with any other quantizer (c')
@@ -49,7 +49,7 @@ C_SCALAR = math.pi * math.e / 6              # ≈ 1.4237 (Panter-Dite scalar)
 
 def main():
     parser = argparse.ArgumentParser(
-        description='LatticeQuant v3: Theorem 4 validation (c-invariance)')
+        description='Theorem 4 validation (c-invariance)')
     parser.add_argument('--sensitivity', type=str, required=True)
     parser.add_argument('--propagation', type=str, default=None)
     parser.add_argument('--budget', type=float, default=4.0)

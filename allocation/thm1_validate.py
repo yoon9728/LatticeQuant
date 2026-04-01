@@ -1,6 +1,6 @@
 """
-LatticeQuant v3 — Theorem 1 Validation
-========================================
+Theorem 1 Validation
+=====================
 Validates the attention-output distortion decomposition:
 
     D_attn ≈ η_K · D_K + η_V · D_V
@@ -461,7 +461,7 @@ class Thm1Validator:
 
 def main():
     parser = argparse.ArgumentParser(
-        description='LatticeQuant v3: Theorem 1 validation')
+        description='Theorem 1 validation')
     parser.add_argument('--model', type=str, default='meta-llama/Llama-3.1-8B')
     parser.add_argument('--sensitivity', type=str, required=True)
     parser.add_argument('--bits', type=int, default=4)

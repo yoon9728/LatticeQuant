@@ -1,6 +1,6 @@
 """
-LatticeQuant v3 — Cross-Layer Error Propagation (P3)
-=====================================================
+Cross-Layer Error Propagation
+==============================
 Measures per-layer amplification factors Γ_l (Theorem 2).
 
 Method: perturbation injection.
@@ -362,7 +362,7 @@ def measure_propagation(
 
 def main():
     parser = argparse.ArgumentParser(
-        description='LatticeQuant v3: Measure cross-layer error propagation')
+        description='Measure cross-layer error propagation')
     parser.add_argument('--model', type=str, default='meta-llama/Llama-3.1-8B')
     parser.add_argument('--seq-len', type=int, default=2048)
     parser.add_argument('--n-samples', type=int, default=3)

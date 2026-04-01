@@ -1,10 +1,10 @@
 """
-LatticeQuant v2 — Phase 2C: Fused Vectorized Triton Merge Kernel
-=================================================================
+Fused Vectorized Triton Merge Kernel
+======================================
 Single-pass kernel: check mask → decode packed OR copy fallback → write.
 No PyTorch scatter. No per-call cumsum. Vectorized BLOCK=128.
 
-Optimizations vs Phase 2B (scatter) and 2C-v1 (scalar):
+Optimizations over scatter and scalar approaches:
   - Precomputed cumsum from chunk (no torch.cumsum per call)
   - Vectorized: each program handles BLOCK blocks
   - Branchless via tl.where (no warp divergence)
@@ -361,7 +361,7 @@ def test_full_cache():
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("LatticeQuant v2 Phase 2C: Fused Vectorized Merge Kernel")
+    print("Fused Vectorized Merge Kernel")
     print("=" * 60)
     print()
     
@@ -371,6 +371,6 @@ if __name__ == '__main__':
     test_full_cache()
     
     if r1 and r2:
-        print("Phase 2C PASSED: Fused vectorized kernel, no scatter, no per-call cumsum.")
+        print("PASSED: Fused vectorized kernel.")
     else:
-        print("Phase 2C FAILED.")
+        print("FAILED.")

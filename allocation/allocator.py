@@ -1,7 +1,7 @@
 """
-LatticeQuant v3 — Attention-Aware Bit Allocation (P5)
-======================================================
-Implements the water-filling optimal allocation from Theorem 3.
+Attention-Aware Bit Allocation
+================================
+Implements the water-filling optimal allocation.
 
 Given per-layer sensitivity (η_K, η_V, σ²_K, σ²_V) and optional
 propagation factors (Γ_l), computes per-layer per-component (K/V)
@@ -345,7 +345,7 @@ def allocate(
 
 def main():
     parser = argparse.ArgumentParser(
-        description='LatticeQuant v3: Attention-aware bit allocation')
+        description='Attention-aware bit allocation')
     parser.add_argument('--sensitivity', type=str, required=True,
                         help='Path to sensitivity JSON')
     parser.add_argument('--propagation', type=str, default=None,

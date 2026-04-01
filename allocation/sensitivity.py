@@ -1,8 +1,8 @@
 """
-LatticeQuant v3 — Attention Sensitivity Extraction (P1)
-========================================================
+Attention Sensitivity Extraction
+=================================
 Computes per-layer, per-head sensitivity metrics for attention-aware
-bit allocation (Theorem 1 of the v3 paper).
+bit allocation.
 
 Metrics extracted:
   η_V,l  = (1/T) Σᵢ ‖aᵢ‖²₂          (value sensitivity, Q-head mean)
@@ -394,7 +394,7 @@ def extract_sensitivity(model_name, seq_len=2048, load_in_8bit=False, output_dir
 
 
 def main():
-    parser = argparse.ArgumentParser(description='LatticeQuant v3: sensitivity extraction')
+    parser = argparse.ArgumentParser(description='sensitivity extraction')
     parser.add_argument('--model', type=str, default='meta-llama/Llama-3.1-8B')
     parser.add_argument('--seq-len', type=int, default=2048)
     parser.add_argument('--load-in-8bit', action='store_true')
