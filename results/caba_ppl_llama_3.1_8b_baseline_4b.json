@@ -1,0 +1,13 @@
+{
+  "model": "meta-llama/Llama-3.1-8B",
+  "mode": "baseline",
+  "bits": 4,
+  "quantizer": "per-block RMS-shared symmetric uniform",
+  "scope": "within-head permutation",
+  "ppl_fp16": 5.643123195841394,
+  "ppl_quant": 7.791535525526815,
+  "delta_pct": 38.07133488187282,
+  "max_length": 2048,
+  "stride": 512,
+  "elapsed_seconds": 401.9894814491272
+}
