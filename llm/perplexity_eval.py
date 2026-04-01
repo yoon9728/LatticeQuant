@@ -1,14 +1,16 @@
 """
-LatticeQuant Perplexity Evaluation (Improved)
-===============================================
-Improvements over v1:
-  1. Per-head σ² estimation (instead of per-tensor)
-  2. Optional RHT within each head (Gaussianizes coordinates)  
+Perplexity Evaluation
+======================
+E₈ lattice KV cache quantization with perplexity evaluation on WikiText-2.
+
+Features:
+  1. Per-head σ² estimation
+  2. Optional RHT within each head (Gaussianizes coordinates)
   3. Outlier clipping before quantization
-  
+
 Usage:
-  python llm/perplexity_eval_v2.py --model meta-llama/Llama-3.2-1B --all
-  python llm/perplexity_eval_v2.py --model meta-llama/Llama-3.2-1B --bits 4.0 --no-rht
+  python llm/perplexity_eval.py --model meta-llama/Llama-3.1-8B --all
+  python llm/perplexity_eval.py --model meta-llama/Llama-3.1-8B --bits 4.0 --no-rht
 """
 
 import torch

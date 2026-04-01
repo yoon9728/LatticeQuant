@@ -1,0 +1,123 @@
+{
+  "model": "Qwen/Qwen2.5-7B",
+  "model_tag": "Qwen2.5-7B",
+  "config": {
+    "seq_len": 2048,
+    "num_layers": 28,
+    "num_kv_heads": 4,
+    "head_dim": 128,
+    "n_rotations": 200
+  },
+  "spectral": {
+    "baseline": {
+      "position_mean": 0.3066251710495717,
+      "position_std": 0.15280435689618915,
+      "M_top1_mean": 0.6805615271607947,
+      "Sigma_top1_mean": 0.07827659716713242
+    },
+    "sorted": {
+      "position_mean": 0.24643889944886666,
+      "position_std": 0.1378883298822855,
+      "M_top1_mean": 0.6805615271607947,
+      "Sigma_top1_mean": 0.1306973742612172
+    },
+    "random_s42": {
+      "position_mean": 0.2653549325300517,
+      "position_std": 0.13716784013283734,
+      "M_top1_mean": 0.6805615271607947,
+      "Sigma_top1_mean": 0.09186929238993409
+    }
+  },
+  "uniqueness": {
+    "actual_baseline": {
+      "iso_risk": 1.1405381877511807e-09,
+      "aniso_mean": 1.1428092377974153e-09,
+      "aniso_std": 4.473560585806355e-11,
+      "aniso_min": 1.0250785775767213e-09,
+      "aniso_max": 1.263160132047858e-09,
+      "aniso_range_ratio": 0.2087449215011085,
+      "M_type": "actual",
+      "Sigma_source": "baseline"
+    },
+    "actual_sorted": {
+      "iso_risk": 1.1349037252454735e-09,
+      "aniso_mean": 1.1390809123712486e-09,
+      "aniso_std": 4.705706638257933e-11,
+      "aniso_min": 1.0148433204903995e-09,
+      "aniso_max": 1.2479378641572225e-09,
+      "aniso_range_ratio": 0.20538706366163872,
+      "M_type": "actual",
+      "Sigma_source": "sorted"
+    },
+    "actual_random_s42": {
+      "iso_risk": 1.143433908102919e-09,
+      "aniso_mean": 1.1423133239318873e-09,
+      "aniso_std": 4.3014197194516666e-11,
+      "aniso_min": 1.0042482401217967e-09,
+      "aniso_max": 1.276259098403898e-09,
+      "aniso_range_ratio": 0.23788944542793627,
+      "M_type": "actual",
+      "Sigma_source": "random_s42"
+    },
+    "rank1_baseline": {
+      "iso_risk": 1.1405385526753282e-09,
+      "aniso_mean": 1.1429706747723144e-09,
+      "aniso_std": 4.570093208998064e-11,
+      "aniso_min": 1.0153590190853379e-09,
+      "aniso_max": 1.294755858083363e-09,
+      "aniso_range_ratio": 0.24496921944694633,
+      "M_type": "rank1",
+      "Sigma_source": "baseline"
+    },
+    "rank1_sorted": {
+      "iso_risk": 1.1349040883668304e-09,
+      "aniso_mean": 1.131645389063074e-09,
+      "aniso_std": 5.174790495980671e-11,
+      "aniso_min": 1.0113772042075198e-09,
+      "aniso_max": 1.2727895404296419e-09,
+      "aniso_range_ratio": 0.23033870342145324,
+      "M_type": "rank1",
+      "Sigma_source": "sorted"
+    },
+    "rank1_random_s42": {
+      "iso_risk": 1.143434273953575e-09,
+      "aniso_mean": 1.1435475105736615e-09,
+      "aniso_std": 4.656686189322999e-11,
+      "aniso_min": 9.995707594967485e-10,
+      "aniso_max": 1.270509919493179e-09,
+      "aniso_range_ratio": 0.2369521066214175,
+      "M_type": "rank1",
+      "Sigma_source": "random_s42"
+    },
+    "near_iso_baseline": {
+      "iso_risk": 1.1405381877511807e-09,
+      "aniso_mean": 1.1407651751005331e-09,
+      "aniso_std": 2.3276262726473846e-12,
+      "aniso_min": 1.1359390095222466e-09,
+      "aniso_max": 1.148282469110029e-09,
+      "aniso_range_ratio": 0.010822486892894228,
+      "M_type": "near_iso",
+      "Sigma_source": "baseline"
+    },
+    "near_iso_sorted": {
+      "iso_risk": 1.1349037252454735e-09,
+      "aniso_mean": 1.1348807993361021e-09,
+      "aniso_std": 2.3717654002014208e-12,
+      "aniso_min": 1.1270712141353556e-09,
+      "aniso_max": 1.1413199274556973e-09,
+      "aniso_range_ratio": 0.012554997400559067,
+      "M_type": "near_iso",
+      "Sigma_source": "sorted"
+    },
+    "near_iso_random_s42": {
+      "iso_risk": 1.143433908102919e-09,
+      "aniso_mean": 1.1433740654265278e-09,
+      "aniso_std": 2.24835290399897e-12,
+      "aniso_min": 1.1381289244383197e-09,
+      "aniso_max": 1.1487515383379332e-09,
+      "aniso_range_ratio": 0.009290098731843248,
+      "M_type": "near_iso",
+      "Sigma_source": "random_s42"
+    }
+  }
+}

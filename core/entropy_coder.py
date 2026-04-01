@@ -1,6 +1,6 @@
 """
-LatticeQuant Phase 2: Entropy Coder (Final)
-============================================
+Parity-Aware Entropy Coder
+===========================
 Parity-aware entropy coding for E₈ lattice quantizer.
 
 Key insight: E₈ = D₈ ∪ (D₈ + 1/2), and D₈ has even-sum constraint.
@@ -260,7 +260,7 @@ def entropy_coding_experiment():
     sigma2 = 1.0
     n_blocks = 2_000_000
 
-    print("Phase 2 Final: Parity-Aware Entropy Coding")
+    print("Parity-Aware Entropy Coding")
     print("Scheme: coset (1 bit) + 7 free coords (entropy) + coord8_half (entropy)")
     print(f"Parity saving: 1 bit / 8 dims = 0.125 bits/dim vs naive 8-coord")
     print(f"σ² = {sigma2}, N = {n_blocks:,} (50/50 train/test)")

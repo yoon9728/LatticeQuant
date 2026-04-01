@@ -1,6 +1,6 @@
 """
-LatticeQuant v2 — Phase 2B: Triton KV Cache Decompression
-==========================================================
+Triton KV Cache Decompression
+===============================
 Integrates Triton dequant kernel with CompressedKVCache.
 
 Optimized decompress path:
@@ -313,7 +313,7 @@ def test_full_cache_latency():
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("LatticeQuant v2 Phase 2B: Triton KV Cache Integration")
+    print("Triton KV Cache Integration")
     print("=" * 60)
     print()
     
@@ -324,6 +324,6 @@ if __name__ == '__main__':
     test_full_cache_latency()
     
     if r1 and r2:
-        print("Phase 2B PASSED.")
+        print("PASSED.")
     else:
-        print("Phase 2B FAILED.")
+        print("FAILED.")

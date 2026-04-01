@@ -1,8 +1,8 @@
 """
-LatticeQuant v2 — Phase 1B: Entropy-Coded E₈ Storage
-=====================================================
+Entropy-Coded E₈ Storage
+==========================
 Variable-length ANS-compressed storage for E₈ lattice points.
-Removes the fixed-rate penalty (27% OOR) from Phase 1A.
+Removes the fixed-rate penalty (27% OOR) from compact storage.
 
 Uses the parity-aware symbolization from entropy_coder.py:
   coset (1 bit) + 7 free coords (entropy coded) + coord8_half (entropy coded)
@@ -35,7 +35,7 @@ try:
     import constriction
 except ImportError:
     raise ImportError(
-        "Phase 1B requires constriction. Install with: pip install constriction"
+        "Entropy storage requires constriction. Install with: pip install constriction"
     )
 
 
@@ -412,7 +412,7 @@ def test_zero_oor():
     """
     from compact_storage import check_representable
     
-    print("Test: Zero out-of-range (vs Phase 1A fixed-length)")
+    print("Test: Zero out-of-range (vs fixed-length)")
     print("=" * 60)
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -427,12 +427,12 @@ def test_zero_oor():
         x = torch.randn(N, 8, device=device)
         q = encode_e8(x / scale)
         
-        # Phase 1A: how many are representable in fixed-length?
+        # Fixed-length: how many are representable in fixed-length?
         in_range = check_representable(q, bits_int)
         oor_fixed = (~in_range).sum().item()
         oor_pct = oor_fixed / N * 100
         
-        # Phase 1B: compress all of them
+        # Entropy-coded: compress all of them
         compressed = compress_e8(q, bits, scale)
         q_rec = decompress_e8(compressed, device)
         
@@ -520,7 +520,7 @@ def test_mse_matches_direct():
 
 def test_memory_comparison():
     """
-    Compare memory: Phase 1A (fixed-length) vs Phase 1B (entropy-coded)
+    Compare memory: fixed-length vs entropy-coded
     for Llama-3.1-8B KV cache dimensions.
     """
     print("Test: Memory comparison — Fixed-length vs Entropy-coded")
@@ -569,7 +569,7 @@ def test_memory_comparison():
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("LatticeQuant v2 Phase 1B: Entropy-Coded E₈ Storage")
+    print("Entropy-Coded E₈ Storage")
     print("=" * 60)
     print()
     
@@ -581,8 +581,8 @@ if __name__ == '__main__':
     
     print()
     if r1 and r2:
-        print("Phase 1B PASSED: Entropy-coded storage is lossless, 0% OOR,")
+        print("PASSED: Entropy-coded storage is lossless, 0% OOR,")
         print("and compressed rate matches target. Fixed-rate penalty eliminated.")
         print("Next: CompressedKVCache integration with HuggingFace transformers.")
     else:
-        print("Phase 1B FAILED.")
+        print("FAILED.")
