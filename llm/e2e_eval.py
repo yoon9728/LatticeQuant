@@ -1,6 +1,6 @@
 """
-LatticeQuant v2 — End-to-End Evaluation
-=========================================
+End-to-End Evaluation
+======================
 Three separate measurements, each with clear semantics:
 
 1. evaluate_ppl()       — Perplexity via sliding window with compressed KV
@@ -375,7 +375,7 @@ def run_suite(model_name: str, bits_list: List[int], max_length: int = 2048,
 
     print()
     print("=" * 85)
-    print(f"LatticeQuant v2 Evaluation: {model_name}")
+    print(f"LatticeQuant Evaluation: {model_name}")
     print(f"  Weight quantization: 8-bit (BitsAndBytes)")
     print(f"  KV cache: E₈ lattice quantization (LatticeQuant)")
     print(f"  Model config: {n_layers}L × {n_kv_heads} KV heads × {head_dim}D")
@@ -508,7 +508,7 @@ def _save_results(all_results: dict, model_name: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='LatticeQuant v2 E2E Evaluation')
+    parser = argparse.ArgumentParser(description='End-to-End Evaluation')
     parser.add_argument('--model', type=str, default='meta-llama/Llama-3.1-8B')
     parser.add_argument('--bits', type=int, default=None)
     parser.add_argument('--all', action='store_true', help='Evaluate 3, 4, 5 bits')

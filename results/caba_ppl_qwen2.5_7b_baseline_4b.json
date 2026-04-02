@@ -1,0 +1,13 @@
+{
+  "model": "Qwen/Qwen2.5-7B",
+  "mode": "baseline",
+  "bits": 4,
+  "quantizer": "per-block RMS-shared symmetric uniform",
+  "scope": "within-head permutation",
+  "ppl_fp16": 6.891800160947044,
+  "ppl_quant": 2510.5864471222903,
+  "delta_pct": 36328.60193986379,
+  "max_length": 2048,
+  "stride": 512,
+  "elapsed_seconds": 353.63587760925293
+}

@@ -1,0 +1,13 @@
+{
+  "model": "Qwen/Qwen2.5-7B",
+  "mode": "sorted",
+  "bits": 5,
+  "quantizer": "e8",
+  "scope": "within-head permutation",
+  "ppl_fp16": 6.8918,
+  "ppl_quant": 101.20336860587669,
+  "delta_pct": 1368.4606141483603,
+  "max_length": 2048,
+  "stride": 512,
+  "elapsed_seconds": 499.587646484375
+}

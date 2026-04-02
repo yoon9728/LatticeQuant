@@ -1,18 +1,17 @@
 """
-LatticeQuant v2 — CompressedKVCache (Optimized Side Info)
-==========================================================
+CompressedKVCache — rANS Entropy-Coded E₈ KV Storage
+======================================================
 rANS entropy-coded E₈ KV storage with minimized overhead.
 
-Optimizations vs v5:
-  1. Coset bit-packed: uint8 per vector → 1 bit per vector (8× smaller)
+Optimizations:
+  1. Coset bit-packed: 1 bit per vector (8× smaller than uint8)
   2. Shared rANS tables: one table per coord_idx, reused across layers
-  3. Float16 scales: float32 → float16 per head (2× smaller)
+  3. Float16 scales: per head (2× smaller than float32)
   4. Bitstream merging: all streams in a chunk → one contiguous buffer
 
-v6 decode optimization:
+Decode:
   - update() keeps decompressed KV buffers across layers (no per-layer free)
   - New tokens concat to existing buffer → O(1) per decode step
-  - _decompress_chunk only used in memory measurement, not in hot path
 
 Target: storage ≈ coded rate + minimal overhead → close to 4.07 bits/dim
 
@@ -663,7 +662,7 @@ def test_decode_no_redecompress():
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("LatticeQuant v2: CompressedKVCache (Optimized Side Info)")
+    print("CompressedKVCache")
     print("=" * 60)
     print()
     test_roundtrip_quality()

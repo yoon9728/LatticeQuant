@@ -1,6 +1,6 @@
 """
-LatticeQuant v2 — Phase 1A: Compact E₈ Storage
-================================================
+Compact E₈ Storage
+====================
 Pack E₈ lattice points into fixed-length byte representation.
 
 Key idea: E₈ = D₈ ∪ (D₈ + ½), and D₈ has even-sum constraint.
@@ -546,7 +546,7 @@ def test_roundtrip_gaussian():
 def test_oor_vs_bitwidth():
     """
     Measure OOR rate as function of bits/dim at Theorem 2 optimal scale.
-    Shows the fixed-rate penalty that motivates Phase 1B (entropy coding).
+    Shows the fixed-rate penalty that motivates entropy coding.
     """
     from e8_quantizer import encode_e8, compute_scale
     
@@ -579,7 +579,7 @@ def test_oor_vs_bitwidth():
     
     print()
     print("Fixed-rate penalty: at optimal scale, some coordinates exceed the range.")
-    print("Phase 1B (entropy coding) removes this constraint entirely.")
+    print("Entropy coding removes this constraint entirely.")
 
 
 def test_memory_accounting():
@@ -617,7 +617,7 @@ def test_memory_accounting():
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("LatticeQuant v2 Phase 1A: Compact E₈ Storage")
+    print("Compact E₈ Storage")
     print("=" * 60)
     print()
     
@@ -630,8 +630,8 @@ if __name__ == '__main__':
     
     print()
     if r1 and r2 and r3:
-        print("Phase 1A PASSED: pack/unpack bit-exact for all representable E₈ points.")
+        print("PASSED: pack/unpack bit-exact for all representable E₈ points.")
         print("Strict mode correctly rejects malformed and out-of-range input.")
-        print("Next: Phase 1B (entropy-coded storage) removes fixed-rate OOR penalty.")
+        print("Next: entropy-coded storage removes fixed-rate OOR penalty.")
     else:
-        print("Phase 1A FAILED.")
+        print("FAILED.")

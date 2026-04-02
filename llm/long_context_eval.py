@@ -1,6 +1,6 @@
 """
-LatticeQuant v2: Long-Context Evaluation
-==========================================
+Long-Context Evaluation
+========================
 Run on Colab Pro (A100 40GB).
 Measures PPL at seq_len = 2048, 4096, 8192, 16384, 32768.
 

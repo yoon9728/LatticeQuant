@@ -1,6 +1,6 @@
 """
-LatticeQuant v2 — Phase 2A: Triton E₈ Dequant Kernel
-=====================================================
+Triton E₈ Dequant Kernel
+==========================
 GPU kernel to decompress packed E₈ uint8 → float16 on-the-fly.
 
 Replaces the Python-loop unpack_e8() with a fused Triton kernel.
@@ -342,7 +342,7 @@ def test_vs_python_speed():
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("LatticeQuant v2 Phase 2A: Triton E₈ Dequant Kernel")
+    print("Triton E₈ Dequant Kernel")
     print("=" * 60)
     print()
     
@@ -351,6 +351,6 @@ if __name__ == '__main__':
     test_vs_python_speed()
     
     if r1:
-        print("Phase 2A PASSED: Triton kernel matches Python unpack.")
+        print("PASSED: Triton kernel matches Python unpack.")
     else:
-        print("Phase 2A FAILED: correctness mismatch.")
+        print("FAILED: correctness mismatch.")

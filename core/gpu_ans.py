@@ -1,6 +1,6 @@
 """
-LatticeQuant v2 — GPU rANS Decode (Final)
-==========================================
+GPU rANS Decode
+================
 Standard streaming rANS (Duda 2009) with GPU-parallel decode via Triton.
 
   Decode: slot = x & (L-1)
@@ -714,7 +714,7 @@ def test_rate_accuracy():
 
 if __name__ == '__main__':
     print("=" * 60)
-    print("LatticeQuant v2: GPU rANS Decode (Final)")
+    print("GPU rANS Decode")
     print("=" * 60)
     print()
 
