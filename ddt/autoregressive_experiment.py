@@ -4,34 +4,28 @@ DDT — Autoregressive KV Cache Reuse Experiment
 Tests whether prefill-based DDT findings transfer to a chunked
 continuation setting with reused KV cache.
 
-Setup:
-  1. Prefill chunk 1 → generate clean KV cache
-  2. Quantize KV cache (permute → block quantize → unpermute)
-  3. Forward chunk 2 with past_key_values = quantized KV
-  4. Measure loss on chunk 2
+Uses the same DynamicCache subclass pattern as caba_eval.py:
+quantization happens inside update(), avoiding all cache internal access.
 
-This is a closer approximation to deployment-time KV reuse than
-prefill-only perturbation, but is NOT identical to online one-token-
-at-a-time decode. It evaluates batched continuation with reused cache.
+Flow:
+  1. Forward chunk 1 with DynamicCache() → clean cache
+  2. Forward chunk 2 with clean cache → clean_loss
+  3. For each permutation config:
+     a. Forward chunk 1 with QuantCache(perms, bits) → quantized cache
+     b. Forward chunk 2 with quantized cache → quant_loss
+     c. ΔL_auto = quant_loss - clean_loss
 
 Chunk alignment with P0:
-  - chunk 1 (index 2) = causal context for cache generation
-  - chunk 2 (index 3) = evaluation text, same as P0 metric computation
-  P0 metrics (tr(MΣ), Q1, MSE) were measured on chunk 2 data, so
-  correlations between P0 metrics and ΔL_auto are on matched text.
+  chunk 1 (index 2) = causal context for cache generation
+  chunk 2 (index 3) = evaluation text, same as P0 metric computation
 
-Key outputs:
-  ρ(ΔL_prefill, ΔL_auto) — if high, prefill is a valid proxy
-  ρ(tr(MΣ), ΔL_auto) vs ρ(MSE, ΔL_auto) — DDT vs MSE in reuse setting
-  ρ(Q1, ΔL_auto) — supplementary (Q1 is signed, interpret with caution)
-
-Requires: transformers >= 4.36 (DynamicCache API)
+Requires: transformers >= 4.36
 
 Usage:
   python -m ddt.autoregressive_experiment \\
       --model meta-llama/Llama-3.1-8B \\
       --det-json results/ddt/caba_explain_v2_Llama-3.1-8B.json \\
-      --bits 3 4 --n-configs 25
+      --bits 3 4 --n-configs 25 --strict
 """
 
 import argparse
@@ -39,18 +33,93 @@ import json
 import math
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict
 
 import numpy as np
 import torch
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers.cache_utils import DynamicCache
 
 try:
     from scipy.stats import spearmanr as scipy_spearmanr
     HAS_SCIPY = True
 except ImportError:
     HAS_SCIPY = False
+
+
+# ============================================================
+# QuantCache — DynamicCache with permuted block quantization
+# ============================================================
+
+class QuantCache(DynamicCache):
+    """DynamicCache that quantizes K/V on update().
+
+    Same pattern as CABACache in caba_eval.py.
+    Quantization: permute dims → per-block uniform QDQ → unpermute.
+    """
+
+    def __init__(self, perms: Dict, bits: int = 4, block_size: int = 8):
+        super().__init__()
+        self.perms = perms
+        self.bits = bits
+        self.block_size = block_size
+        self.n_levels = 2 ** bits
+        self._shape_checked = False
+
+    def _quantize_head(self, x: torch.Tensor, perm: torch.Tensor) -> torch.Tensor:
+        """Quantize a single head: permute → block QDQ → unpermute.
+
+        x: (batch, seq_len, head_dim)
+        perm: (head_dim,)
+        """
+        inv_perm = torch.argsort(perm)
+        x_f = x.float()
+        x_perm = x_f[:, :, perm]
+
+        B, T, hd = x_perm.shape
+        n_blocks = hd // self.block_size
+        blocks = x_perm.reshape(B, T, n_blocks, self.block_size)
+
+        # Per-block RMS-shared symmetric uniform QDQ
+        half = self.n_levels / 2
+        rms = torch.sqrt((blocks ** 2).mean(dim=-1, keepdim=True) + 1e-12)
+        scale = 3.0 * rms / half  # alpha=3
+        scaled = blocks / scale
+        quant = torch.round(scaled.clamp(-half, half - 1))
+        blocks_qd = quant * scale
+
+        x_hat_perm = blocks_qd.reshape(B, T, hd)
+        x_hat = x_hat_perm[:, :, inv_perm]
+        return x_hat.to(x.dtype)
+
+    def _quantize_tensor(self, tensor: torch.Tensor, layer_idx: int,
+                          component: str) -> torch.Tensor:
+        """Quantize all heads in a K or V tensor.
+
+        tensor: (batch, num_heads, seq_len, head_dim)
+        """
+        assert tensor.ndim == 4, f"Expected 4D tensor, got {tensor.ndim}D"
+        if not self._shape_checked:
+            assert tensor.shape[-1] % self.block_size == 0, (
+                f"head_dim={tensor.shape[-1]} not divisible by block_size={self.block_size}")
+            self._shape_checked = True
+        B, H, T, D = tensor.shape
+        out = torch.empty_like(tensor)
+        device = tensor.device
+
+        for h in range(H):
+            perm = self.perms[layer_idx][component][h].to(device)
+            head_data = tensor[:, h, :, :]  # (B, T, D)
+            out[:, h, :, :] = self._quantize_head(head_data, perm)
+
+        return out
+
+    def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
+        """Override: quantize K/V before storing in cache."""
+        k_quant = self._quantize_tensor(key_states, layer_idx, "K")
+        v_quant = self._quantize_tensor(value_states, layer_idx, "V")
+        return super().update(k_quant, v_quant, layer_idx, cache_kwargs)
 
 
 # ============================================================
@@ -99,167 +168,54 @@ def make_random_permutations(num_layers, num_kv_heads, head_dim, seed=42):
     return perms
 
 
-def quantize_uniform_blocks(x: torch.Tensor, bits: int, alpha: float = 3.0):
-    """Per-block RMS-shared symmetric uniform quantize-dequantize."""
-    n_levels = 2 ** bits
-    half = n_levels / 2
-    rms = torch.sqrt((x ** 2).mean(dim=-1, keepdim=True) + 1e-12)
-    scale = alpha * rms / half
-    x_scaled = x / scale
-    x_quant = torch.round(x_scaled.clamp(-half, half - 1))
-    return x_quant * scale
-
-
 # ============================================================
-# KV cache utilities
-# ============================================================
-
-def kv_to_legacy(past_key_values) -> Tuple[Tuple[torch.Tensor, torch.Tensor], ...]:
-    """Convert any cache format to legacy tuple of (key, value)."""
-    # Already a tuple of tuples
-    if isinstance(past_key_values, tuple) and len(past_key_values) > 0:
-        if isinstance(past_key_values[0], tuple):
-            return past_key_values
-
-    # DynamicCache with to_legacy_cache
-    if hasattr(past_key_values, 'to_legacy_cache'):
-        try:
-            return past_key_values.to_legacy_cache()
-        except Exception:
-            pass
-
-    # DynamicCache with key_cache/value_cache lists
-    if hasattr(past_key_values, 'key_cache') and hasattr(past_key_values, 'value_cache'):
-        return tuple(
-            (k, v) for k, v in zip(past_key_values.key_cache, past_key_values.value_cache)
-        )
-
-    raise TypeError(f"Cannot convert {type(past_key_values)} to legacy KV cache")
-
-
-def legacy_to_cache(kv_tuple):
-    """Wrap legacy tuple back to DynamicCache for model compatibility."""
-    try:
-        from transformers.cache_utils import DynamicCache
-        cache = DynamicCache()
-        for layer_idx, (k, v) in enumerate(kv_tuple):
-            # Newer transformers: DynamicCache stores as lists directly
-            if hasattr(cache, 'key_cache') and isinstance(cache.key_cache, list):
-                cache.key_cache.append(k)
-                cache.value_cache.append(v)
-            else:
-                cache.update(k, v, layer_idx)
-        return cache
-    except (ImportError, TypeError, AttributeError):
-        # Fallback: return as-is (legacy tuple)
-        return kv_tuple
-
-
-def validate_kv_cache(kv_tuple, num_layers: int, num_kv_heads: int,
-                      head_dim: int, label: str = "KV cache"):
-    """Assert KV cache shape consistency."""
-    assert len(kv_tuple) == num_layers, (
-        f"{label}: expected {num_layers} layers, got {len(kv_tuple)}")
-    k0, v0 = kv_tuple[0]
-    assert k0.shape[-2] > 0, f"{label}: empty sequence dimension"
-    assert k0.shape[-1] == head_dim, (
-        f"{label}: head_dim mismatch: {k0.shape[-1]} vs {head_dim}")
-    assert k0.shape[-3] == num_kv_heads, (
-        f"{label}: num_kv_heads mismatch: {k0.shape[-3]} vs {num_kv_heads}")
-
-
-def quantize_kv_cache(
-    kv_tuple: Tuple,
-    perms: Dict,
-    bits: int,
-    num_kv_heads: int,
-    head_dim: int,
-    block_size: int = 8,
-) -> Tuple:
-    """Quantize a legacy KV cache. Returns new tuple (does not modify input)."""
-    assert head_dim % block_size == 0
-    quantized = []
-
-    for layer_idx, (key, value) in enumerate(kv_tuple):
-        new_key = key.clone()
-        new_value = value.clone()
-
-        for h in range(num_kv_heads):
-            for comp_name, tensor in [("K", new_key), ("V", new_value)]:
-                perm = perms[layer_idx][comp_name][h].to(tensor.device)
-                inv_perm = torch.argsort(perm)
-
-                v_h = tensor[:, h, :, :].float()
-                v_perm = v_h[:, :, perm]
-                n_blocks = head_dim // block_size
-                B, T = v_perm.shape[0], v_perm.shape[1]
-                blocks = v_perm.reshape(B, T, n_blocks, block_size)
-                blocks_qd = quantize_uniform_blocks(blocks, bits)
-                v_hat_perm = blocks_qd.reshape(B, T, head_dim)
-                v_hat = v_hat_perm[:, :, inv_perm]
-                tensor[:, h, :, :] = v_hat.to(tensor.dtype)
-
-        quantized.append((new_key, new_value))
-
-    return tuple(quantized)
-
-
-# ============================================================
-# Sanity check: cache-reuse loss vs full-concatenated loss
+# Sanity check
 # ============================================================
 
 @torch.no_grad()
-def sanity_check_cache_reuse(model, chunk1_ids, chunk2_ids, clean_kv_legacy):
-    """Verify that cache-reuse loss matches full-concatenated loss.
+def sanity_check_cache_reuse(model, chunk1_ids, chunk2_ids):
+    """Verify cache-reuse loss matches full-concatenated loss.
 
-    Compares:
-      Path A: model(chunk2, past_key_values=clean_kv) → loss on chunk2
-      Path B: model([chunk1+chunk2]) → loss on chunk2 portion only
-
-    These should match within floating-point tolerance. If they don't,
-    the cache-reuse path has a bug (position_ids, attention_mask, etc.).
+    Path A: chunk1 → cache → chunk2 with cache → loss
+    Path B: [chunk1+chunk2] one pass → chunk2 loss
     """
     device = chunk1_ids.device
-    seq_len_c1 = chunk1_ids.shape[1]
-    seq_len_c2 = chunk2_ids.shape[1]
+    c1_len = chunk1_ids.shape[1]
+    c2_len = chunk2_ids.shape[1]
 
     # Path A: cache reuse
-    position_ids_c2 = torch.arange(seq_len_c1, seq_len_c1 + seq_len_c2,
-                                    device=device).unsqueeze(0)
-    attention_mask_c2 = torch.ones(1, seq_len_c1 + seq_len_c2,
-                                    device=device, dtype=torch.long)
+    cache_a = DynamicCache()
+    model(chunk1_ids, past_key_values=cache_a, use_cache=True)
+
+    pos_ids = torch.arange(c1_len, c1_len + c2_len, device=device).unsqueeze(0)
+    attn_mask = torch.ones(1, c1_len + c2_len, device=device, dtype=torch.long)
 
     out_a = model(
         chunk2_ids,
-        past_key_values=legacy_to_cache(clean_kv_legacy),
-        attention_mask=attention_mask_c2,
-        position_ids=position_ids_c2,
+        past_key_values=cache_a,
+        attention_mask=attn_mask,
+        position_ids=pos_ids,
         labels=chunk2_ids,
         use_cache=False,
     )
     loss_a = out_a.loss.item()
 
-    # Path B: full concatenated, measure chunk2 loss only
+    # Path B: full concatenated
     full_ids = torch.cat([chunk1_ids, chunk2_ids], dim=1)
     out_b = model(full_ids, use_cache=False)
-    logits_b = out_b.logits  # [B, seq_len_c1+seq_len_c2, vocab]
+    logits_b = out_b.logits
 
-    # Extract chunk2 logits and compute loss manually
-    # HF causal LM: predict token[i+1] from logits[i]
-    # For chunk2 portion: logits at positions [c1-1, c1, ..., c1+c2-2]
-    # predict tokens at positions [c1, c1+1, ..., c1+c2-1]
-    chunk2_logits = logits_b[:, seq_len_c1 - 1:seq_len_c1 + seq_len_c2 - 1, :]
-    chunk2_labels = full_ids[:, seq_len_c1:seq_len_c1 + seq_len_c2]
-
+    # Manual chunk2 CE loss (shifted by 1)
+    c2_logits = logits_b[:, c1_len - 1:c1_len + c2_len - 1, :]
+    c2_labels = full_ids[:, c1_len:c1_len + c2_len]
     loss_fn = torch.nn.CrossEntropyLoss()
     loss_b = loss_fn(
-        chunk2_logits.reshape(-1, chunk2_logits.shape[-1]),
-        chunk2_labels.reshape(-1),
+        c2_logits.reshape(-1, c2_logits.shape[-1]),
+        c2_labels.reshape(-1),
     ).item()
 
     gap = abs(loss_a - loss_b)
-    ok = gap < 0.01  # tolerance for 8-bit base model
-
+    ok = gap < 0.01
     return loss_a, loss_b, gap, ok
 
 
@@ -272,15 +228,14 @@ def main():
         description="DDT Autoregressive KV Cache Reuse Experiment"
     )
     parser.add_argument("--model", type=str, required=True)
-    parser.add_argument("--det-json", type=str, required=True,
-                        help="P0 JSON for prefill ΔL and DDT metrics")
+    parser.add_argument("--det-json", type=str, required=True)
     parser.add_argument("--bits", type=int, nargs="+", default=[3, 4])
     parser.add_argument("--n-configs", type=int, default=25)
     parser.add_argument("--seq-len", type=int, default=2048)
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--no-8bit", action="store_true")
     parser.add_argument("--strict", action="store_true",
-                        help="Abort if sanity check fails (recommended for paper results)")
+                        help="Abort if sanity check fails")
     args = parser.parse_args()
 
     model_tag = args.model.split("/")[-1]
@@ -327,7 +282,6 @@ def main():
     text = "\n\n".join(dataset["text"])
     all_input_ids = tokenizer(text, return_tensors="pt").input_ids
 
-    # Chunk 1 = context (index 2), Chunk 2 = evaluation (index 3, matches P0)
     chunk1_start = 2 * args.seq_len
     chunk2_start = 3 * args.seq_len
     chunk1_ids = all_input_ids[:, chunk1_start:chunk1_start + args.seq_len].to(device)
@@ -336,21 +290,12 @@ def main():
     print(f"  Chunk 1 (context): tokens [{chunk1_start}, {chunk1_start + args.seq_len})")
     print(f"  Chunk 2 (eval, = P0 chunk): tokens [{chunk2_start}, {chunk2_start + args.seq_len})")
 
-    # ---- Generate clean KV cache from chunk 1 ----
-    print("\n  Generating clean KV cache from chunk 1...")
-    with torch.no_grad():
-        out1 = model(chunk1_ids, use_cache=True)
-    clean_kv_legacy = kv_to_legacy(out1.past_key_values)
-    validate_kv_cache(clean_kv_legacy, num_layers, num_kv_heads, head_dim,
-                      "Clean KV cache")
-    print(f"  KV cache: {len(clean_kv_legacy)} layers, "
-          f"key shape: {clean_kv_legacy[0][0].shape}")
-
-    # ---- Sanity check: cache-reuse vs full-concatenated ----
+    # ---- Sanity check ----
     print("\n  Sanity check: cache-reuse loss vs full-concatenated loss...")
-    loss_reuse, loss_concat, gap, ok = sanity_check_cache_reuse(
-        model, chunk1_ids, chunk2_ids, clean_kv_legacy,
-    )
+    with torch.no_grad():
+        loss_reuse, loss_concat, gap, ok = sanity_check_cache_reuse(
+            model, chunk1_ids, chunk2_ids,
+        )
     status = "PASS" if ok else "FAIL"
     print(f"  Cache-reuse loss:  {loss_reuse:.6f}")
     print(f"  Full-concat loss:  {loss_concat:.6f}")
@@ -358,36 +303,42 @@ def main():
     if not ok:
         print("  WARNING: cache-reuse path may have position/mask issues.")
         if args.strict:
-            raise RuntimeError("Sanity check FAILED with --strict. Fix position/mask handling.")
-        print("  Proceeding, but results should be interpreted with caution.")
+            raise RuntimeError("Sanity check FAILED with --strict.")
+        print("  Proceeding with caution.")
 
-    clean_loss_c2 = loss_reuse  # use cache-reuse path as baseline
+    # ---- Clean baseline: chunk1 cache → chunk2 loss ----
+    print("\n  Measuring clean chunk 2 loss...")
+    c1_len = chunk1_ids.shape[1]
+    c2_len = chunk2_ids.shape[1]
+    pos_ids_c2 = torch.arange(c1_len, c1_len + c2_len, device=device).unsqueeze(0)
+    attn_mask_c2 = torch.ones(1, c1_len + c2_len, device=device, dtype=torch.long)
 
-    # ---- Precompute position_ids and attention_mask ----
-    seq_len_c1 = chunk1_ids.shape[1]
-    seq_len_c2 = chunk2_ids.shape[1]
-    position_ids_c2 = torch.arange(
-        seq_len_c1, seq_len_c1 + seq_len_c2, device=device
-    ).unsqueeze(0)
-    attention_mask_c2 = torch.ones(
-        1, seq_len_c1 + seq_len_c2, device=device, dtype=torch.long
-    )
+    with torch.no_grad():
+        clean_cache = DynamicCache()
+        model(chunk1_ids, past_key_values=clean_cache, use_cache=True)
+
+        out_clean = model(
+            chunk2_ids,
+            past_key_values=clean_cache,
+            attention_mask=attn_mask_c2,
+            position_ids=pos_ids_c2,
+            labels=chunk2_ids,
+            use_cache=False,
+        )
+        clean_loss_c2 = out_clean.loss.item()
+    print(f"  Clean chunk 2 loss: {clean_loss_c2:.4f}")
 
     # ---- Build permutation configs (must match P0 exactly) ----
     perm_configs = {}
     perm_configs["baseline"] = make_identity_permutations(
         num_layers, num_kv_heads, head_dim
     )
-    # P0 uses seeds 42, 43, ..., 42+N-2 for random configs
     for i in range(args.n_configs - 1):
         seed = 42 + i
         perm_configs[f"random_s{seed}"] = make_random_permutations(
             num_layers, num_kv_heads, head_dim, seed=seed
         )
-    # NOTE: P0's "sorted" config requires actual activation data to reconstruct.
-    # We exclude it here rather than using a fake placeholder.
-    # Correlation is computed only on configs present in both P0 and this experiment.
-    print(f"  {len(perm_configs)} permutation configs (baseline + {args.n_configs - 1} random)")
+    print(f"  {len(perm_configs)} permutation configs")
 
     # ---- Run experiments ----
     results = {}
@@ -399,7 +350,6 @@ def main():
 
         bit_results = []
 
-        # Build P0 lookup
         p0_by_mode = {}
         for c in det_configs:
             if c["bits"] == bits:
@@ -409,24 +359,23 @@ def main():
             t0 = time.time()
 
             with torch.no_grad():
-                quant_kv = quantize_kv_cache(
-                    clean_kv_legacy, perms, bits,
-                    num_kv_heads, head_dim, block_size,
-                )
+                # Forward chunk 1 with quantizing cache
+                quant_cache = QuantCache(perms, bits=bits, block_size=block_size)
+                model(chunk1_ids, past_key_values=quant_cache, use_cache=True)
 
-                out2_quant = model(
+                # Forward chunk 2 with quantized cache
+                out_quant = model(
                     chunk2_ids,
-                    past_key_values=legacy_to_cache(quant_kv),
-                    attention_mask=attention_mask_c2,
-                    position_ids=position_ids_c2,
+                    past_key_values=quant_cache,
+                    attention_mask=attn_mask_c2,
+                    position_ids=pos_ids_c2,
                     labels=chunk2_ids,
                     use_cache=False,
                 )
-                quant_loss_c2 = out2_quant.loss.item()
+                quant_loss = out_quant.loss.item()
 
-            dl_auto = quant_loss_c2 - clean_loss_c2
+            dl_auto = quant_loss - clean_loss_c2
 
-            # P0 lookup
             p0 = p0_by_mode.get(mode, {})
             dl_prefill = p0.get("delta_loss")
             tr_m_sigma = p0.get("tr_M_Sigma")
@@ -446,9 +395,9 @@ def main():
             }
             bit_results.append(entry)
 
-            prefill_str = f"prefill={dl_prefill:+.4f}" if dl_prefill is not None else "prefill=N/A"
+            pf_str = f"prefill={dl_prefill:+.4f}" if dl_prefill is not None else "prefill=N/A"
             print(f"  [{cfg_idx+1:2d}/{len(perm_configs)}] {mode:16s}: "
-                  f"auto={dl_auto:+.4f}  {prefill_str}  ({elapsed:.1f}s)")
+                  f"auto={dl_auto:+.4f}  {pf_str}  ({elapsed:.1f}s)")
 
         # ---- Ranking correlations ----
         valid = [r for r in bit_results
@@ -490,21 +439,20 @@ def main():
             print(f"\n  Ranking: insufficient valid configs ({len(valid)})")
             ranking = {"n_configs": len(valid), "error": "insufficient"}
 
-        # ---- Summary ----
-        dl_autos_all = [r["dl_auto"] for r in bit_results]
+        dl_all = [r["dl_auto"] for r in bit_results]
         print(f"\n  --- Summary ({bits}b) ---")
-        print(f"  Auto ΔL: mean={np.mean(dl_autos_all):.4f}, "
-              f"std={np.std(dl_autos_all):.4f}, "
-              f"range=[{min(dl_autos_all):.4f}, {max(dl_autos_all):.4f}]")
+        print(f"  Auto ΔL: mean={np.mean(dl_all):.4f}, "
+              f"std={np.std(dl_all):.4f}, "
+              f"range=[{min(dl_all):.4f}, {max(dl_all):.4f}]")
 
         results[f"{bits}b"] = {
             "configs": bit_results,
             "ranking": ranking,
             "summary": {
-                "mean_dl_auto": float(np.mean(dl_autos_all)),
-                "std_dl_auto": float(np.std(dl_autos_all)),
-                "min_dl_auto": float(min(dl_autos_all)),
-                "max_dl_auto": float(max(dl_autos_all)),
+                "mean_dl_auto": float(np.mean(dl_all)),
+                "std_dl_auto": float(np.std(dl_all)),
+                "min_dl_auto": float(min(dl_all)),
+                "max_dl_auto": float(max(dl_all)),
             },
         }
 
@@ -513,7 +461,7 @@ def main():
     output_data = {
         "model": args.model,
         "model_tag": model_tag,
-        "version": "autoregressive_experiment_v2",
+        "version": "autoregressive_experiment_v3",
         "transformers_version": transformers.__version__,
         "config": {
             "bits": args.bits,
