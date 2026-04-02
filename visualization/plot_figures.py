@@ -10,7 +10,7 @@ Required files in results/ddt/:
   caba_explain_v2_Qwen2.5-32B.json
 
 Usage:
-  python -m ddt.plot_figures --results-dir results/ddt --output-dir figures/ddt
+  python -m visualization.plot_figures --results-dir results/ddt --output-dir figures/ddt
 """
 
 import argparse

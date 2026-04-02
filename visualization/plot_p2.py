@@ -4,7 +4,7 @@ P2 Figure: Dithered vs Deterministic ΔL spread
 Strip plot showing that dithering collapses permutation-induced variation.
 
 Usage:
-  python -m ddt.plot_p2 --results-dir results/ddt --output-dir figures/ddt
+  python -m visualization.plot_p2 --results-dir results/ddt --output-dir figures/ddt
 """
 
 import argparse
