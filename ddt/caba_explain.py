@@ -159,25 +159,15 @@ def make_random_permutations(
 # Block quantization (matches caba_eval.py _qd_uniform exactly)
 # ============================================================
 
-def quantize_uniform_blocks(x: torch.Tensor, bits: int) -> torch.Tensor:
-    """Per-block RMS-shared symmetric uniform quantize-dequantize.
-
-    This is a block-quantizer proxy -- not E_8.  Used here to isolate
-    block-assignment effects independent of lattice geometry.
-
-    Args:
-        x: (..., 8) -- last dim is block_size=8.
-        bits: quantization bitwidth (integer).
-
-    Returns:
-        Quantized-dequantized tensor, same shape.
-    """
+def quantize_uniform_blocks(x: torch.Tensor, bits: int, alpha: float = 3.0) -> torch.Tensor:
+    """Per-block symmetric uniform quantize-dequantize with bit-dependent step size."""
     n_levels = 2 ** bits
-    rms = torch.sqrt((x ** 2).mean(dim=-1, keepdim=True) + 1e-12)
-    x_scaled = x / rms
     half = n_levels / 2
+    rms = torch.sqrt((x ** 2).mean(dim=-1, keepdim=True) + 1e-12)
+    scale = alpha * rms / half
+    x_scaled = x / scale
     x_quant = torch.round(x_scaled.clamp(-half, half - 1))
-    return x_quant * rms
+    return x_quant * scale
 
 
 # ============================================================
