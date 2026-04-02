@@ -160,11 +160,37 @@ def make_random_permutations(
 # ============================================================
 
 def quantize_uniform_blocks(x: torch.Tensor, bits: int, alpha: float = 3.0) -> torch.Tensor:
-    """Per-block symmetric uniform quantize-dequantize with bit-dependent step size."""
+    """Per-block symmetric uniform quantize-dequantize with bit-dependent step size.
+
+    This is a block-quantizer proxy -- not E_8.  Used here to isolate
+    block-assignment effects independent of lattice geometry.
+
+    Quantization grid: 2^bits levels spanning [-alpha*rms, alpha*rms].
+    Step size (scale): alpha * rms / 2^(b-1).
+
+    Each additional bit halves the step size, yielding ~6 dB/bit MSE
+    reduction (standard uniform quantization property).
+
+    Bug fix note (v2):
+      The v1 quantizer used scale=rms regardless of bits, so step size
+      was constant and only the clipping range changed with bits.
+      For b>=3 with RMS-normalized data in [-3,3], clipping never occurred,
+      making 3b/4b/5b produce identical results.
+      The fix: scale = alpha*rms / half, making step size ∝ 2^{-b}.
+
+    Args:
+        x: (..., 8) -- last dim is block_size=8.
+        bits: quantization bitwidth (integer).
+        alpha: number of RMS units covered by the full grid range.
+               alpha=3.0 covers ±3*rms (99.7% of Gaussian data).
+
+    Returns:
+        Quantized-dequantized tensor, same shape.
+    """
     n_levels = 2 ** bits
-    half = n_levels / 2
+    half = n_levels / 2   # float: 2b->2.0, 3b->4.0, 4b->8.0, 5b->16.0
     rms = torch.sqrt((x ** 2).mean(dim=-1, keepdim=True) + 1e-12)
-    scale = alpha * rms / half
+    scale = alpha * rms / half   # step size in original coordinates
     x_scaled = x / scale
     x_quant = torch.round(x_scaled.clamp(-half, half - 1))
     return x_quant * scale
@@ -436,6 +462,10 @@ def compute_directional_metrics(
 
     Returns K/V/total separated aggregates + per-head details.
     """
+    assert head_dim % block_size == 0, (
+        f"head_dim={head_dim} not divisible by block_size={block_size}. "
+        f"Block quantization requires exact division."
+    )
     per_head = {}
     agg = {
         scope: {
@@ -629,11 +659,12 @@ def measure_actual_delta_loss(
         hooks.append(attn.k_proj.register_forward_hook(make_quant_hook(idx, "K")))
         hooks.append(attn.v_proj.register_forward_hook(make_quant_hook(idx, "V")))
 
-    outputs = model(input_ids, labels=input_ids, use_cache=False)
-    quant_loss = outputs.loss.item()
-
-    for h in hooks:
-        h.remove()
+    try:
+        outputs = model(input_ids, labels=input_ids, use_cache=False)
+        quant_loss = outputs.loss.item()
+    finally:
+        for h in hooks:
+            h.remove()
 
     return quant_loss
 
@@ -1106,10 +1137,12 @@ def main():
             "best_predictor": best_metric[0],
         }
 
-    # ---- All-bits pooled analysis ----
+    # ---- All-bits pooled analysis (supplementary: cross-bit scale dominates) ----
+    # NOTE: Pooled correlation is inflated by bitwidth differences (2b MSE >> 5b MSE).
+    # Main claims use per-bitwidth correlations above. Pooled is for reference only.
     all_items_with_dl = [c for c in config_list if c["delta_loss"] is not None]
     if len(all_items_with_dl) >= 10:
-        print(f"\n--- ALL BITS POOLED ({len(all_items_with_dl)} configs) ---")
+        print(f"\n--- ALL BITS POOLED ({len(all_items_with_dl)} configs) [supplementary] ---")
 
         delta_losses_all = [c["delta_loss"] for c in all_items_with_dl]
         pooled_corr = {}
@@ -1178,8 +1211,9 @@ def main():
         oracle = e2e["oracle"]
         print(f"  {'ORACLE':<20s} {oracle['best_mode']:<20s} {oracle['best_actual_delta_loss']:>10.4f}")
 
-        # Compare: did DDT-best beat MSE-best?
-        ddt_dl = e2e["Q1_linear_pred"]["best_actual_delta_loss"]
+        # Compare: did DDT-best (tr(MΣ)) beat MSE-best?
+        # Role separation: Q1 = prediction/validation, tr(MΣ) = selection/design
+        ddt_dl = e2e["tr_M_Sigma"]["best_actual_delta_loss"]
         mse_dl = e2e["MSE_tr_Sigma"]["best_actual_delta_loss"]
         if ddt_dl < mse_dl:
             improvement = (mse_dl - ddt_dl) / mse_dl * 100
