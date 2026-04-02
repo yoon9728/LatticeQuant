@@ -1,54 +1,84 @@
 """
-DDT — CABA Anomaly Directional Explanation
-============================================
+DDT — CABA Anomaly Directional Explanation (v2)
+=================================================
 Paper-defining experiment for Directional Distortion Theory.
+
+v2 changes (addressing reviewer critique):
+  - Permutation count: 7 -> 50+ (statistical significance)
+  - Bit-width sweep: [2, 3, 4, 5] (regime coverage)
+  - Three metrics compared on identical config set:
+      Q1 (linear predictor, Theorem A),
+      tr(M Sigma) (directional risk, Theorem B proxy),
+      tr(Sigma) (MSE / error power, naive baseline)
+  - Bootstrap CI for all Spearman/Pearson correlations
+  - End-to-end evidence: MSE-best vs DDT-best config comparison
+  - Flat output structure for direct figure generation
 
 Core question:
   Why does permuting dimensions within quantization blocks change PPL
   dramatically, even when MSE stays similar or decreases?
 
 DDT answer:
-  Loss degradation is governed by tr(M·Σ), not tr(Σ) alone.
+  Loss degradation is governed by tr(M·Sigma), not tr(Sigma) alone.
   - M = sensitivity matrix (gradient outer product, captures direction)
-  - Σ = error covariance (depends on permutation + quantizer)
-  Permutation changes which dimensions share a block, altering Σ's
+  - Sigma = error covariance (depends on permutation + quantizer)
+  Permutation changes which dimensions share a block, altering Sigma's
   alignment with M's high-eigenvalue directions.
 
-Experiment design:
-  For each (model, permutation_mode={baseline, sorted, random×N_seeds}):
-    1. Measure M via backward pass, averaged over multiple calibration
-       chunks for stability (addresses reviewer concern on M noise).
-    2. Quantize K/V with permutation → compute error → Σ.
-    3. Compute tr(MΣ) [directional predictor] and tr(Σ) [error power].
-    4. Measure actual Δloss on the same calibration batch (direct
-       predictor comparison, not just PPL reference from caba_eval).
-    5. Compare rankings: does tr(MΣ) predict degradation better than tr(Σ)?
+Theory-code correspondence:
+  Q1 = sum_{l,j} (s^l_j)^T e^l_j          [Theorem A, Eq. (3)]
+     Code: (g_h * e).sum() per head, aggregated over (l, comp, h).
+     g_h = dL/d(v^l_j)|_clean from backward pass (last chunk).
+     e = v_hat - v from quantize-dequantize on same last chunk.
+
+  tr(M Sigma) = directional risk proxy     [Theorem B(ii) analog]
+     M = (1/T) sum_j s_j s_j^T  (multi-chunk averaged).
+     Sigma_u = (1/T) e^T e  (uncentered, deterministic error).
+     In dithered setting this equals the theorem's exact variance;
+     in deterministic setting it serves as a ranking proxy.
+
+  tr(Sigma) = MSE / error power            [naive baseline]
+     Isotropic assumption: treats all error directions equally.
+
+  delta_loss = L(v_hat) - L(v)             [Theorem A, measured]
+     Forward pass with quantization hooks on all layers simultaneously.
+     Includes cross-layer effects (Q2 + higher-order).
+     Computed on same data batch as Q1 and Sigma for fair comparison.
+
+  HLP bounds: sum a_i b_{d+1-i} <= tr(M Sigma) <= sum a_i b_i
+     [Theorem C(ii)]
+     a_i, b_i = eigenvalues of M, Sigma in descending order.
+
+  Centered/uncentered gap:
+     Sigma_u - Sigma_c = mu mu^T where mu = E[e|D]  [Remark 5]
+     Quantifies bias drift in deterministic quantizers.
 
 Quantizer note:
   Uses per-block RMS-shared symmetric uniform quantization (matches
   caba_eval.py exactly).  This is a block-quantizer proxy to isolate
-  block-assignment / permutation effects, independent of E₈ lattice
+  block-assignment / permutation effects, independent of E_8 lattice
   geometry.  The uniform quantizer is sufficient because the directional
   phenomenon arises from block structure, not lattice shape.
 
 Architecture note:
   Sensitivity is measured w.r.t. k_proj / v_proj layer outputs.  In the
   evaluated implementations (Llama, Qwen, Mistral), these outputs
-  coincide with the cached K/V representations — no further linear
+  coincide with the cached K/V representations -- no further linear
   transform is applied between projection and caching.  This is checked
   at runtime by verifying that the hooked output shape matches
   (batch, seq_len, num_kv_heads * head_dim).
 
 Usage:
-  python -m ddt.caba_explain \\
-      --model Qwen/Qwen2.5-7B \\
-      --caba results/caba_qwen2.5_7b.json \\
-      --bits 4
-
-  python -m ddt.caba_explain \\
+  # Full P0 experiment (50 permutations x 4 bitwidths = 200 configs)
+  python -m ddt.caba_explain_v2 \\
       --model meta-llama/Llama-3.1-8B \\
       --caba results/caba_llama_3.1_8b.json \\
-      --bits 4
+      --bits 2 3 4 5 --n-random-seeds 48
+
+  python -m ddt.caba_explain_v2 \\
+      --model Qwen/Qwen2.5-7B \\
+      --caba results/caba_qwen2.5_7b.json \\
+      --bits 2 3 4 5 --n-random-seeds 48
 """
 
 import argparse
@@ -63,6 +93,16 @@ import torch
 import torch.nn as nn
 from datasets import load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
+# scipy for proper Spearman/Pearson with tie-handling and p-values
+try:
+    from scipy.stats import spearmanr as _scipy_spearmanr
+    from scipy.stats import pearsonr as _scipy_pearsonr
+    HAS_SCIPY = True
+except ImportError:
+    HAS_SCIPY = False
+    print("WARNING: scipy not found. Using manual Spearman (no tie handling). "
+          "Install scipy for publication-quality statistics.")
 
 
 # ============================================================
@@ -122,12 +162,12 @@ def make_random_permutations(
 def quantize_uniform_blocks(x: torch.Tensor, bits: int) -> torch.Tensor:
     """Per-block RMS-shared symmetric uniform quantize-dequantize.
 
-    This is a block-quantizer proxy — not E₈.  Used here to isolate
+    This is a block-quantizer proxy -- not E_8.  Used here to isolate
     block-assignment effects independent of lattice geometry.
 
     Args:
-        x: (..., 8) — last dim is block_size=8.
-        bits: quantization bitwidth.
+        x: (..., 8) -- last dim is block_size=8.
+        bits: quantization bitwidth (integer).
 
     Returns:
         Quantized-dequantized tensor, same shape.
@@ -197,7 +237,7 @@ class SensitivityMeasurer:
 
         The requires_grad_(True) call ensures gradient tracking for
         intermediate activations in BitsAndBytes 8-bit models.  This
-        does NOT alter the forward computation — it only retains
+        does NOT alter the forward computation -- it only retains
         gradient flow through this node.  Validated by sanity check:
         if gradient is captured (non-None, non-zero), the hook worked.
         """
@@ -301,13 +341,14 @@ class SensitivityMeasurer:
 
         Returns:
             (results_dict, losses_list)
-            results_dict: (layer, comp, head) -> {M, M_eigenvalues, M_trace, tensor}
+            results_dict: (layer, comp, head) -> {M, M_eigenvalues, M_trace, tensor, grad}
                 'M' is averaged over all chunks (population estimate).
                 'tensor' is from the LAST chunk only (for Sigma computation).
+                'grad' is from the LAST chunk only (for Q1 computation).
                 This is intentional: M estimates the expected sensitivity
-                landscape (benefits from averaging), while Sigma measures
-                error covariance on a specific input (the same input used
-                for delta-loss measurement in Phase 3).
+                landscape (benefits from averaging), while Sigma and Q1
+                measure quantities on a specific input (the same input used
+                for delta-loss measurement).
             losses_list: per-chunk loss values.
         """
         total_tokens = all_input_ids.shape[1]
@@ -315,7 +356,7 @@ class SensitivityMeasurer:
         losses = []
         M_accum = {}
         last_tensors = {}
-        last_grads = {}    # raw gradients from last chunk (for linear predictor)
+        last_grads = {}
 
         for chunk_idx in range(n_chunks):
             start = chunk_idx * seq_len
@@ -339,6 +380,7 @@ class SensitivityMeasurer:
             T = seq_len
             for key, data in chunk_data.items():
                 g_h = data["grad"]
+                # M_chunk = (1/T) sum_j s_j s_j^T  [paper Definition 1]
                 M_chunk = (g_h.T @ g_h) / T
 
                 if key not in M_accum:
@@ -390,15 +432,19 @@ def compute_directional_metrics(
     """
     Compute tr(M Sigma) and error power for a given permutation set.
 
-    For each (layer, component, head):
+    Theory-code correspondence for each (layer, component, head):
       1. Apply permutation to raw KV tensor
       2. Reshape into 8-dim blocks -> quantize -> dequantize
       3. Compute error e = x_hat - x (in original dimension order)
-      4. Compute Sigma_u = (1/T) e^T e  [uncentered second moment]
-      5. Compute Sigma_c = Sigma_u - mu mu^T  [centered covariance]
-      6. Compute tr(M Sigma) for both
+      4. Q1 contribution: sum_j s_j^T e_j  [Theorem A, Eq. (3)]
+         Uses last-chunk gradient (same data as delta-loss measurement)
+      5. Sigma_u = (1/T) e^T e  [uncentered second moment]
+      6. Sigma_c = Sigma_u - mu mu^T  [centered covariance, Remark 5]
+      7. tr(M Sigma_u) = directional risk  [Theorem B proxy]
+      8. tr(Sigma_u) = MSE / error power  [naive baseline]
+      9. HLP bounds from eigenvalues  [Theorem C(ii)]
 
-    Returns K/V/total separated aggregates.
+    Returns K/V/total separated aggregates + per-head details.
     """
     per_head = {}
     agg = {
@@ -412,13 +458,14 @@ def compute_directional_metrics(
 
     for (l, comp, h), data in M_data.items():
         M = data["M"]
-        v_h = data["tensor"]
-        g_h = data["grad"]     # [T, d_h] — raw gradient from last chunk
+        v_h = data["tensor"]      # [T, d_h] -- last chunk KV tensor
+        g_h = data["grad"]        # [T, d_h] -- last chunk gradient = s^l_j
         T = v_h.shape[0]
 
         perm = perms[l][comp][h]
         inv_perm = torch.argsort(perm)
 
+        # Permute -> block-quantize -> unpermute
         v_perm = v_h[:, perm]
         n_blocks = head_dim // block_size
         blocks = v_perm.reshape(T, n_blocks, block_size)
@@ -426,26 +473,36 @@ def compute_directional_metrics(
         v_hat_perm = blocks_qd.reshape(T, head_dim)
         v_hat = v_hat_perm[:, inv_perm]
 
+        # Quantization error in original coordinate system
         e = v_hat - v_h
 
-        # === First-order predictor (Theorem A) ===
-        # ΔL ≈ Σ_j s_j^T e_j  (position-wise gradient·error inner product)
+        # === Q1: First-order predictor [Theorem A, Eq. (3)] ===
+        # Q1 = sum_j (s^l_j)^T e^l_j  for this head
+        # g_h[j, :] = s^{l,h}_j, e[j, :] = e^{l,h}_j
+        # Element-wise multiply and sum = sum of inner products over positions
         linear_pred_val = (g_h * e).sum().item()
 
-        # Uncentered second moment
+        # === Uncentered second moment: Sigma_u = (1/T) e^T e ===
         Sigma_u = (e.T @ e) / T
 
-        # Centered covariance
-        e_mean = e.mean(dim=0, keepdim=True)
+        # === Centered covariance: Sigma_c = Sigma_u - mu mu^T [Remark 5] ===
+        e_mean = e.mean(dim=0, keepdim=True)    # mu = E[e|D], position-averaged
         Sigma_c = Sigma_u - (e_mean.T @ e_mean)
 
+        # === tr(M Sigma) [Theorem B proxy] ===
         tr_M_Sigma_u = torch.trace(M @ Sigma_u).item()
         tr_M_Sigma_c = torch.trace(M @ Sigma_c).item()
+
+        # === tr(Sigma) = MSE [naive baseline] ===
         tr_Sigma_u = Sigma_u.trace().item()
         tr_Sigma_c = Sigma_c.trace().item()
+
+        # === Bias norm: ||mu|| quantifies D2(a) violation [Remark 5] ===
         mean_bias_norm = e_mean.norm().item()
 
-        # Spectral analysis + HLP bounds (Theorem C)
+        # === HLP bounds [Theorem C(ii)] ===
+        # a_i = M eigenvalues (descending), b_i = Sigma eigenvalues (descending)
+        # Upper: sum a_i b_i (co-aligned), Lower: sum a_i b_{d+1-i} (counter-aligned)
         M_eigvals = data["M_eigenvalues"]
         Sigma_eigvals = torch.linalg.eigvalsh(Sigma_u).flip(0)
 
@@ -541,7 +598,13 @@ def measure_actual_delta_loss(
     This is a prefill-style perturbation experiment: all positions are
     processed in a single forward pass with quantized projections.  It
     is NOT identical to autoregressive decode-time cache reuse, but
-    serves as a direct local predictor for tr(M Sigma) validation.
+    serves as a direct measurement target for Q1 validation.
+
+    Theory correspondence:
+      Returns delta_loss = L(v_hat) - L(v) = Delta L
+      This is the EXACT quantity that Q1 approximates:
+        Q1 = sum_{l,j} s_j^T e_j  ≈  Delta L  [Theorem A]
+      The gap (Delta L - Q1) = Q2 + R3 (higher-order terms).
 
     Injects quantization error via forward hooks on k_proj/v_proj:
     intercept output, apply permute -> quantize -> unpermute, replace.
@@ -643,18 +706,153 @@ def load_model(model_name: str, load_in_8bit: bool = True):
 
 
 # ============================================================
-# Statistical utilities
+# Statistical utilities (publication-quality)
 # ============================================================
 
-def spearman_rank_corr(x: List[float], y: List[float]) -> float:
-    """Spearman rank correlation between two lists."""
+def spearman_corr(x: List[float], y: List[float]) -> Tuple[float, float]:
+    """Spearman rank correlation with p-value.
+
+    Uses scipy if available (handles ties correctly via midrank).
+    Falls back to manual O(n) implementation otherwise.
+
+    Returns:
+        (rho, p_value).  p_value is NaN if scipy unavailable.
+    """
     n = len(x)
     if n < 3:
-        return float("nan")
-    rx = np.argsort(np.argsort(x)).astype(float)
-    ry = np.argsort(np.argsort(y)).astype(float)
-    d = rx - ry
-    return 1 - 6 * np.sum(d ** 2) / (n * (n ** 2 - 1))
+        return float("nan"), float("nan")
+
+    if HAS_SCIPY:
+        res = _scipy_spearmanr(x, y)
+        return float(res.statistic), float(res.pvalue)
+    else:
+        # Manual Spearman (no tie handling -- use scipy for paper)
+        xa, ya = np.array(x), np.array(y)
+        rx = np.argsort(np.argsort(xa)).astype(float)
+        ry = np.argsort(np.argsort(ya)).astype(float)
+        d = rx - ry
+        rho = 1 - 6 * np.sum(d ** 2) / (n * (n ** 2 - 1))
+        return float(rho), float("nan")
+
+
+def pearson_corr(x: List[float], y: List[float]) -> Tuple[float, float]:
+    """Pearson correlation with p-value.
+
+    Returns:
+        (r, p_value).  p_value is NaN if scipy unavailable.
+    """
+    n = len(x)
+    if n < 3:
+        return float("nan"), float("nan")
+
+    if HAS_SCIPY:
+        res = _scipy_pearsonr(x, y)
+        return float(res.statistic), float(res.pvalue)
+    else:
+        r = float(np.corrcoef(x, y)[0, 1])
+        return r, float("nan")
+
+
+def bootstrap_ci(
+    x: List[float],
+    y: List[float],
+    corr_fn,
+    n_boot: int = 10000,
+    alpha: float = 0.05,
+    seed: int = 0,
+) -> Tuple[float, float, float]:
+    """Bootstrap confidence interval for a correlation statistic.
+
+    Resamples (x_i, y_i) pairs with replacement, computes the
+    correlation on each resample, returns percentile CI.
+
+    Args:
+        x, y: paired observations.
+        corr_fn: function(x, y) -> (statistic, p_value).
+        n_boot: number of bootstrap resamples.
+        alpha: significance level (0.05 for 95% CI).
+        seed: RNG seed for reproducibility.
+
+    Returns:
+        (point_estimate, ci_lower, ci_upper).
+    """
+    x_arr, y_arr = np.array(x), np.array(y)
+    n = len(x_arr)
+
+    point, _ = corr_fn(x, y)
+
+    rng = np.random.RandomState(seed)
+    boot_stats = np.empty(n_boot)
+    for i in range(n_boot):
+        idx = rng.choice(n, size=n, replace=True)
+        stat, _ = corr_fn(x_arr[idx].tolist(), y_arr[idx].tolist())
+        boot_stats[i] = stat
+
+    # Filter NaN (can happen if resampled data is degenerate)
+    boot_valid = boot_stats[~np.isnan(boot_stats)]
+    if len(boot_valid) < n_boot * 0.9:
+        print(f"  WARNING: {n_boot - len(boot_valid)}/{n_boot} bootstrap "
+              f"resamples produced NaN")
+
+    ci_lo = float(np.percentile(boot_valid, 100 * alpha / 2))
+    ci_hi = float(np.percentile(boot_valid, 100 * (1 - alpha / 2)))
+
+    return point, ci_lo, ci_hi
+
+
+# ============================================================
+# End-to-end evidence: MSE-best vs DDT-best
+# ============================================================
+
+def compute_end_to_end_evidence(config_list: List[Dict], bits: int) -> Dict:
+    """For a given bitwidth, compare the config chosen by each metric.
+
+    For each of the three metrics (Q1/linear_pred, tr(MΣ), MSE/tr(Σ)):
+      - Find the config that the metric ranks as "best" (lowest value)
+      - Report that config's actual delta_loss
+
+    If DDT-best has lower actual delta_loss than MSE-best, DDT is a
+    better design tool.
+
+    Args:
+        config_list: list of dicts with keys
+            {mode, bits, linear_pred, tr_M_Sigma, tr_Sigma, delta_loss}
+        bits: filter to this bitwidth
+
+    Returns:
+        Dict with per-metric best config and actual delta_loss.
+    """
+    items = [c for c in config_list if c["bits"] == bits and c["delta_loss"] is not None]
+    if len(items) < 3:
+        return {"error": f"too few configs with delta_loss at {bits}b"}
+
+    result = {}
+    for metric_name, metric_key in [
+        ("Q1_linear_pred", "linear_pred"),
+        ("tr_M_Sigma", "tr_M_Sigma"),
+        ("MSE_tr_Sigma", "tr_Sigma"),
+    ]:
+        # Best = lowest metric value (least predicted degradation)
+        best = min(items, key=lambda c: c[metric_key])
+        worst = max(items, key=lambda c: c[metric_key])
+
+        result[metric_name] = {
+            "best_mode": best["mode"],
+            "best_metric_val": best[metric_key],
+            "best_actual_delta_loss": best["delta_loss"],
+            "worst_mode": worst["mode"],
+            "worst_metric_val": worst[metric_key],
+            "worst_actual_delta_loss": worst["delta_loss"],
+        }
+
+    # Oracle: config with actual lowest delta_loss
+    oracle_best = min(items, key=lambda c: c["delta_loss"])
+    result["oracle"] = {
+        "best_mode": oracle_best["mode"],
+        "best_actual_delta_loss": oracle_best["delta_loss"],
+    }
+
+    return result
 
 
 # ============================================================
@@ -663,17 +861,21 @@ def spearman_rank_corr(x: List[float], y: List[float]) -> float:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="DDT CABA Anomaly Directional Explanation"
+        description="DDT CABA Anomaly Directional Explanation (v2)"
     )
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--caba", type=str, default=None,
                         help="Path to caba_analysis JSON (sorted permutation)")
-    parser.add_argument("--bits", type=int, nargs="+", default=[4])
+    parser.add_argument("--bits", type=int, nargs="+", default=[2, 3, 4, 5],
+                        help="Bitwidths to sweep (default: 2 3 4 5)")
     parser.add_argument("--seq-len", type=int, default=2048)
     parser.add_argument("--n-chunks", type=int, default=4,
                         help="Calibration chunks for M averaging (default: 4)")
-    parser.add_argument("--n-random-seeds", type=int, default=5,
-                        help="Random permutation seeds (default: 5)")
+    parser.add_argument("--n-random-seeds", type=int, default=48,
+                        help="Random permutation seeds (default: 48). "
+                             "Total configs = (n_random_seeds + 1 or 2) x len(bits)")
+    parser.add_argument("--n-bootstrap", type=int, default=10000,
+                        help="Bootstrap resamples for CI (default: 10000)")
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--no-8bit", action="store_true",
                         help="Load model in fp16 instead of 8-bit")
@@ -687,14 +889,27 @@ def main():
     if args.output is None:
         out_dir = Path("results/ddt")
         out_dir.mkdir(parents=True, exist_ok=True)
-        args.output = str(out_dir / f"caba_explain_{model_tag}.json")
+        args.output = str(out_dir / f"caba_explain_v2_{model_tag}.json")
 
-    print(f"Model:         {args.model}")
-    print(f"Bits:          {args.bits}")
-    print(f"Seq len:       {args.seq_len}")
-    print(f"M chunks:      {args.n_chunks}")
-    print(f"Random seeds:  {args.n_random_seeds}")
-    print(f"Output:        {args.output}")
+    n_special = 1  # baseline
+    if args.caba is not None:
+        n_special += 1  # + sorted
+    n_total_per_bit = n_special + args.n_random_seeds
+    n_total = n_total_per_bit * len(args.bits)
+
+    print(f"{'='*60}")
+    print(f"DDT CABA Explain v2 — P0 Experiment")
+    print(f"{'='*60}")
+    print(f"Model:           {args.model}")
+    print(f"Bits:            {args.bits}")
+    print(f"Seq len:         {args.seq_len}")
+    print(f"M chunks:        {args.n_chunks}")
+    print(f"Random seeds:    {args.n_random_seeds}")
+    print(f"Configs/bit:     {n_total_per_bit}")
+    print(f"Total configs:   {n_total}")
+    print(f"Bootstrap:       {args.n_bootstrap}")
+    print(f"Output:          {args.output}")
+    print(f"Skip delta-loss: {args.skip_delta_loss}")
 
     # ---- Load model ----
     print("\nLoading model...")
@@ -724,13 +939,13 @@ def main():
     print(f"  Measured {len(M_data)} (layer, comp, head) entries")
     print(f"  Chunk losses: {[f'{l:.4f}' for l in chunk_losses]}")
 
-    # ---- Clean loss for delta-loss (uses LAST chunk = same data as Sigma) ----
+    # ---- Clean loss (uses LAST chunk = same data as Sigma and Q1) ----
     last_chunk_start = (len(chunk_losses) - 1) * args.seq_len
     clean_ids = all_input_ids[:, last_chunk_start:last_chunk_start + args.seq_len].to(device)
 
     with torch.no_grad():
         clean_loss = model(clean_ids, labels=clean_ids, use_cache=False).loss.item()
-    print(f"  Clean loss: {clean_loss:.4f}")
+    print(f"  Clean loss (last chunk): {clean_loss:.4f}")
 
     # ---- Phase 2: Permutations ----
     print(f"\n{'='*60}")
@@ -747,13 +962,23 @@ def main():
         perm_sets[f"random_s{seed}"] = make_random_permutations(
             num_layers, num_kv_heads, head_dim, seed=seed
         )
-    print(f"  Modes: {list(perm_sets.keys())}")
+    print(f"  Total permutation modes: {len(perm_sets)}")
+    print(f"  Modes: baseline" +
+          (", sorted" if args.caba else "") +
+          f", random_s42..random_s{42 + args.n_random_seeds - 1}")
 
     # ---- Phase 3: Directional metrics + delta-loss ----
     print(f"\n{'='*60}")
-    print("Phase 3: Computing directional metrics + delta-loss")
+    print(f"Phase 3: Computing directional metrics + delta-loss ({n_total} configs)")
     print(f"{'='*60}")
+
+    # Flat config list for figures and statistical analysis
+    config_list = []
+    # Structured results (backward compat)
     all_results = {}
+
+    total_elapsed = 0.0
+    config_count = 0
 
     for bits in args.bits:
         print(f"\n--- Bitwidth: {bits} ---")
@@ -774,7 +999,32 @@ def main():
                 delta_loss = quant_loss - clean_loss
 
             elapsed = time.time() - t0
+            total_elapsed += elapsed
+            config_count += 1
+
             key = f"{mode}_{bits}b"
+
+            # Flat config entry (for figures)
+            config_entry = {
+                "mode": mode,
+                "bits": bits,
+                "key": key,
+                "linear_pred": metrics["agg_total"]["linear_pred"],
+                "tr_M_Sigma": metrics["agg_total"]["tr_M_Sigma"],
+                "tr_Sigma": metrics["agg_total"]["tr_Sigma"],
+                "tr_M_Sigma_c": metrics["agg_total"]["tr_M_Sigma_c"],
+                "tr_Sigma_c": metrics["agg_total"]["tr_Sigma_c"],
+                "linear_pred_K": metrics["agg_K"]["linear_pred"],
+                "linear_pred_V": metrics["agg_V"]["linear_pred"],
+                "tr_M_Sigma_K": metrics["agg_K"]["tr_M_Sigma"],
+                "tr_M_Sigma_V": metrics["agg_V"]["tr_M_Sigma"],
+                "tr_Sigma_K": metrics["agg_K"]["tr_Sigma"],
+                "tr_Sigma_V": metrics["agg_V"]["tr_Sigma"],
+                "delta_loss": delta_loss,
+            }
+            config_list.append(config_entry)
+
+            # Structured result (backward compat)
             all_results[key] = {
                 "mode": mode, "bits": bits,
                 "agg_K": metrics["agg_K"],
@@ -788,165 +1038,294 @@ def main():
 
             dl_str = f"dl={delta_loss:.4f}" if delta_loss is not None else "dl=skip"
             lp = metrics['agg_total']['linear_pred']
-            print(
-                f"  {mode:16s}: "
-                f"linpred={lp:.4f}  "
-                f"tr(MS)={metrics['agg_total']['tr_M_Sigma']:.4e}  "
-                f"{dl_str}  ({elapsed:.1f}s)"
+            if config_count <= 10 or mode in ("baseline", "sorted") or config_count % 10 == 0:
+                print(
+                    f"  [{config_count:3d}/{n_total}] {mode:16s} {bits}b: "
+                    f"Q1={lp:+.4f}  "
+                    f"tr(MS)={metrics['agg_total']['tr_M_Sigma']:.4e}  "
+                    f"MSE={metrics['agg_total']['tr_Sigma']:.4e}  "
+                    f"{dl_str}  ({elapsed:.1f}s)"
+                )
+
+    print(f"\n  Total: {config_count} configs in {total_elapsed:.0f}s "
+          f"({total_elapsed/config_count:.1f}s/config)")
+
+    # ---- Phase 4: Statistical Analysis ----
+    print(f"\n{'='*60}")
+    print("Phase 4: Statistical Analysis (per-bitwidth)")
+    print(f"{'='*60}")
+
+    correlation_results = {}
+
+    for bits in args.bits:
+        items = [c for c in config_list if c["bits"] == bits]
+        has_dl = all(c["delta_loss"] is not None for c in items)
+        n_cfg = len(items)
+
+        print(f"\n--- {bits}b ({n_cfg} configs) ---")
+
+        if not has_dl or n_cfg < 5:
+            print("  Skipping: insufficient data or no delta_loss")
+            continue
+
+        delta_losses = [c["delta_loss"] for c in items]
+        bit_corr = {}
+
+        for metric_name, metric_key in [
+            ("Q1_linear_pred", "linear_pred"),
+            ("tr_M_Sigma", "tr_M_Sigma"),
+            ("MSE_tr_Sigma", "tr_Sigma"),
+        ]:
+            vals = [c[metric_key] for c in items]
+
+            # Spearman with bootstrap CI
+            rho_point, rho_lo, rho_hi = bootstrap_ci(
+                vals, delta_losses, spearman_corr,
+                n_boot=args.n_bootstrap, seed=bits * 1000,
+            )
+            _, rho_p = spearman_corr(vals, delta_losses)
+
+            # Pearson with bootstrap CI
+            r_point, r_lo, r_hi = bootstrap_ci(
+                vals, delta_losses, pearson_corr,
+                n_boot=args.n_bootstrap, seed=bits * 1000 + 1,
+            )
+            _, r_p = pearson_corr(vals, delta_losses)
+
+            bit_corr[metric_name] = {
+                "spearman_rho": rho_point,
+                "spearman_ci_95": [rho_lo, rho_hi],
+                "spearman_p": rho_p,
+                "pearson_r": r_point,
+                "pearson_ci_95": [r_lo, r_hi],
+                "pearson_p": r_p,
+            }
+
+            p_str = f"p={rho_p:.2e}" if not math.isnan(rho_p) else "p=N/A"
+            print(f"  {metric_name:20s}: "
+                  f"ρ={rho_point:+.3f} [{rho_lo:+.3f}, {rho_hi:+.3f}]  {p_str}  |  "
+                  f"r={r_point:+.3f} [{r_lo:+.3f}, {r_hi:+.3f}]")
+
+        # Identify best predictor
+        best_metric = max(bit_corr.items(), key=lambda kv: abs(kv[1]["spearman_rho"]))
+        print(f"  >>> Best predictor (|ρ|): {best_metric[0]}")
+
+        correlation_results[f"{bits}b"] = {
+            "n_configs": n_cfg,
+            "correlations": bit_corr,
+            "best_predictor": best_metric[0],
+        }
+
+    # ---- All-bits pooled analysis ----
+    all_items_with_dl = [c for c in config_list if c["delta_loss"] is not None]
+    if len(all_items_with_dl) >= 10:
+        print(f"\n--- ALL BITS POOLED ({len(all_items_with_dl)} configs) ---")
+
+        delta_losses_all = [c["delta_loss"] for c in all_items_with_dl]
+        pooled_corr = {}
+
+        for metric_name, metric_key in [
+            ("Q1_linear_pred", "linear_pred"),
+            ("tr_M_Sigma", "tr_M_Sigma"),
+            ("MSE_tr_Sigma", "tr_Sigma"),
+        ]:
+            vals = [c[metric_key] for c in all_items_with_dl]
+
+            rho_point, rho_lo, rho_hi = bootstrap_ci(
+                vals, delta_losses_all, spearman_corr,
+                n_boot=args.n_bootstrap, seed=99999,
+            )
+            _, rho_p = spearman_corr(vals, delta_losses_all)
+
+            r_point, r_lo, r_hi = bootstrap_ci(
+                vals, delta_losses_all, pearson_corr,
+                n_boot=args.n_bootstrap, seed=99998,
             )
 
-    # ---- Phase 4: PPL reference ----
+            pooled_corr[metric_name] = {
+                "spearman_rho": rho_point,
+                "spearman_ci_95": [rho_lo, rho_hi],
+                "spearman_p": rho_p,
+                "pearson_r": r_point,
+                "pearson_ci_95": [r_lo, r_hi],
+            }
+
+            p_str = f"p={rho_p:.2e}" if not math.isnan(rho_p) else "p=N/A"
+            print(f"  {metric_name:20s}: "
+                  f"ρ={rho_point:+.3f} [{rho_lo:+.3f}, {rho_hi:+.3f}]  {p_str}  |  "
+                  f"r={r_point:+.3f} [{r_lo:+.3f}, {r_hi:+.3f}]")
+
+        correlation_results["all_bits_pooled"] = {
+            "n_configs": len(all_items_with_dl),
+            "correlations": pooled_corr,
+        }
+
+    # ---- Phase 5: End-to-end evidence ----
     print(f"\n{'='*60}")
-    print("Phase 4: PPL reference")
+    print("Phase 5: End-to-End Evidence (MSE-best vs DDT-best)")
+    print(f"{'='*60}")
+
+    e2e_results = {}
+
+    for bits in args.bits:
+        e2e = compute_end_to_end_evidence(config_list, bits)
+        if "error" in e2e:
+            print(f"  {bits}b: {e2e['error']}")
+            continue
+
+        e2e_results[f"{bits}b"] = e2e
+
+        print(f"\n  --- {bits}b ---")
+        print(f"  {'Metric':<20s} {'Best config':<20s} {'Δloss':>10s}  "
+              f"{'Worst config':<20s} {'Δloss':>10s}")
+        print(f"  {'-'*84}")
+
+        for metric_name in ["Q1_linear_pred", "tr_M_Sigma", "MSE_tr_Sigma"]:
+            d = e2e[metric_name]
+            print(f"  {metric_name:<20s} {d['best_mode']:<20s} {d['best_actual_delta_loss']:>10.4f}  "
+                  f"{d['worst_mode']:<20s} {d['worst_actual_delta_loss']:>10.4f}")
+
+        oracle = e2e["oracle"]
+        print(f"  {'ORACLE':<20s} {oracle['best_mode']:<20s} {oracle['best_actual_delta_loss']:>10.4f}")
+
+        # Compare: did DDT-best beat MSE-best?
+        ddt_dl = e2e["Q1_linear_pred"]["best_actual_delta_loss"]
+        mse_dl = e2e["MSE_tr_Sigma"]["best_actual_delta_loss"]
+        if ddt_dl < mse_dl:
+            improvement = (mse_dl - ddt_dl) / mse_dl * 100
+            print(f"  >>> DDT-best Δloss {ddt_dl:.4f} < MSE-best {mse_dl:.4f}  "
+                  f"({improvement:.1f}% better)")
+        elif ddt_dl > mse_dl:
+            print(f"  >>> MSE-best Δloss {mse_dl:.4f} < DDT-best {ddt_dl:.4f}")
+        else:
+            print(f"  >>> Tied: same config selected by both metrics")
+
+    # ---- Phase 6: K vs V breakdown ----
+    print(f"\n{'='*60}")
+    print("Phase 6: K vs V Sensitivity Breakdown")
+    print(f"{'='*60}")
+
+    kv_breakdown = {}
+    for bits in args.bits:
+        items = [c for c in config_list if c["bits"] == bits]
+        k_fracs = []
+        for c in items:
+            total = c["tr_M_Sigma_K"] + c["tr_M_Sigma_V"]
+            k_frac = c["tr_M_Sigma_K"] / total if total > 1e-20 else 0.5
+            k_fracs.append(k_frac)
+        mean_k = np.mean(k_fracs)
+        std_k = np.std(k_fracs)
+        kv_breakdown[f"{bits}b"] = {
+            "K_frac_mean": float(mean_k),
+            "K_frac_std": float(std_k),
+        }
+        print(f"  {bits}b: K-path fraction = {mean_k:.1%} ± {std_k:.1%}")
+
+    # ---- Phase 7: Centered vs uncentered (bias drift diagnostic) ----
+    print(f"\n{'='*60}")
+    print("Phase 7: Bias Drift Diagnostic (Centered vs Uncentered)")
+    print(f"{'='*60}")
+
+    bias_drift_results = {}
+    for bits in args.bits:
+        items = [c for c in config_list if c["bits"] == bits]
+        gaps = []
+        for c in items:
+            u = c["tr_M_Sigma"]
+            cent = c["tr_M_Sigma_c"]
+            gap_pct = abs(u - cent) / abs(u) * 100 if abs(u) > 1e-20 else 0
+            gaps.append(gap_pct)
+        mean_gap = np.mean(gaps)
+        std_gap = np.std(gaps)
+        bias_drift_results[f"{bits}b"] = {
+            "gap_pct_mean": float(mean_gap),
+            "gap_pct_std": float(std_gap),
+        }
+        print(f"  {bits}b: centered/uncentered gap = {mean_gap:.1f}% ± {std_gap:.1f}%")
+
+    # ---- Phase 8: Mean-zero condition (z-scores) ----
+    print(f"\n{'='*60}")
+    print("Phase 8: Mean-Zero Condition Check")
+    print(f"{'='*60}")
+    # Under D2(a), E[Q1|D] = 0.  For deterministic quantizer, this is approximate.
+    # z-score = linear_pred / (std of linear_pred across random seeds)
+    for bits in args.bits:
+        random_items = [c for c in config_list
+                        if c["bits"] == bits and c["mode"].startswith("random")]
+        if len(random_items) < 5:
+            continue
+        lp_values = [c["linear_pred"] for c in random_items]
+        lp_mean = np.mean(lp_values)
+        lp_std = np.std(lp_values)
+        z = lp_mean / (lp_std / np.sqrt(len(lp_values))) if lp_std > 1e-20 else 0
+        print(f"  {bits}b: Q1 mean = {lp_mean:.4f}, std = {lp_std:.4f}, "
+              f"z = {z:.2f} (|z|<2 → consistent with mean-zero)")
+
+    # ---- Phase 9: PPL reference ----
+    print(f"\n{'='*60}")
+    print("Phase 9: PPL Reference (from existing caba_eval results)")
     print(f"{'='*60}")
     ppl_data = load_ppl_results(args.results_dir, model_tag)
-    for k, v in sorted(ppl_data.items()):
-        print(f"  {k}: PPL={v['ppl']:.1f}")
-
-    # ---- Summary table ----
-    print(f"\n{'='*80}")
-    print(f"DIRECTIONAL ANALYSIS — {model_tag}")
-    print(f"{'='*80}")
-    print(f"{'Config':<24s} {'linear_pred':>12s} {'delta_loss':>10s} "
-          f"{'tr(MS)':>12s} {'err_pwr':>12s} {'PPL':>10s}")
-    print("-" * 90)
-
-    for key, res in sorted(all_results.items()):
-        ppl_str = ""
-        ppl_candidates = [key]
-        if res["mode"].startswith("random"):
-            ppl_candidates.append(f"random_{res['bits']}b")
-        for pk in ppl_candidates:
-            if pk in ppl_data:
-                ppl_str = f"{ppl_data[pk]['ppl']:.1f}"
-                break
-
-        dl_str = f"{res['delta_loss']:.4f}" if res['delta_loss'] is not None else "-"
-        lp = res['agg_total']['linear_pred']
-        print(f"{key:<24s} {lp:>12.4f} {dl_str:>10s} "
-              f"{res['agg_total']['tr_M_Sigma']:>12.4e} "
-              f"{res['agg_total']['tr_Sigma']:>12.4e} {ppl_str:>10s}")
-
-    # ---- K vs V breakdown ----
-    print(f"\n--- K vs V breakdown ---")
-    print(f"{'Config':<24s} {'tr(MS)_K':>12s} {'tr(MS)_V':>12s} {'K_frac':>8s}")
-    print("-" * 60)
-    for key, res in sorted(all_results.items()):
-        k_val = res["agg_K"]["tr_M_Sigma"]
-        v_val = res["agg_V"]["tr_M_Sigma"]
-        total = k_val + v_val
-        k_frac = k_val / total if total > 0 else 0
-        print(f"{key:<24s} {k_val:>12.4e} {v_val:>12.4e} {k_frac:>8.1%}")
-
-    # ---- Ranking + Spearman ----
-    print(f"\n--- Ranking Diagnostic ---")
-    for bits in args.bits:
-        items = {k: v for k, v in all_results.items() if v["bits"] == bits}
-        if len(items) < 3:
-            continue
-
-        keys_list = sorted(items.keys())
-        lin_preds = [items[k]["agg_total"]["linear_pred"] for k in keys_list]
-        err_pwrs = [items[k]["agg_total"]["tr_Sigma"] for k in keys_list]
-        dir_risks = [items[k]["agg_total"]["tr_M_Sigma"] for k in keys_list]
-        delta_losses = [items[k]["delta_loss"] for k in keys_list]
-
-        has_dl = all(dl is not None for dl in delta_losses)
-
-        print(f"\n  {bits}b ({len(keys_list)} configs):")
-        if has_dl:
-            rho_lin = spearman_rank_corr(lin_preds, delta_losses)
-            rho_dir = spearman_rank_corr(dir_risks, delta_losses)
-            rho_mse = spearman_rank_corr(err_pwrs, delta_losses)
-            print(f"    Spearman(linear_pred, dl) = {rho_lin:.4f}  ← Theorem A")
-            print(f"    Spearman(tr(MS), dl)      = {rho_dir:.4f}  ← Theorem B (variance)")
-            print(f"    Spearman(err_pwr, dl)     = {rho_mse:.4f}  ← naive MSE")
-            # Pearson for linear_pred vs dl (should be ~1.0 in linear regime)
-            if len(lin_preds) >= 3:
-                corr = np.corrcoef(lin_preds, delta_losses)[0, 1]
-                print(f"    Pearson(linear_pred, dl)  = {corr:.4f}")
-            winner = max(
-                [("linear_pred", abs(rho_lin)), ("tr(MS)", abs(rho_dir)), ("err_pwr", abs(rho_mse))],
-                key=lambda x: x[1]
-            )
-            print(f"    >>> Best predictor: {winner[0]}")
-
-    # ---- Random seed stats ----
-    for bits in args.bits:
-        r_keys = [k for k in all_results
-                  if k.startswith("random_") and all_results[k]["bits"] == bits]
-        if len(r_keys) < 2:
-            continue
-
-        r_lin = [all_results[k]["agg_total"]["linear_pred"] for k in r_keys]
-        r_dir = [all_results[k]["agg_total"]["tr_M_Sigma"] for k in r_keys]
-        r_err = [all_results[k]["agg_total"]["tr_Sigma"] for k in r_keys]
-        r_dl = [all_results[k]["delta_loss"] for k in r_keys
-                if all_results[k]["delta_loss"] is not None]
-
-        print(f"\n  Random seed stats ({bits}b, {len(r_keys)} seeds):")
-        print(f"    linear_pred: {np.mean(r_lin):.4f} +/- {np.std(r_lin):.4f}")
-        print(f"    tr(MS): {np.mean(r_dir):.4e} +/- {np.std(r_dir):.4e}")
-        print(f"    err_pwr: {np.mean(r_err):.4e} +/- {np.std(r_err):.4e}")
-        if r_dl:
-            print(f"    dl: {np.mean(r_dl):.4f} +/- {np.std(r_dl):.4f}")
-
-        sorted_key = f"sorted_{bits}b"
-        if sorted_key in all_results:
-            s_dir = all_results[sorted_key]["agg_total"]["tr_M_Sigma"]
-            outside = s_dir < min(r_dir) or s_dir > max(r_dir)
-            print(f"    sorted tr(MS)={s_dir:.4e} — "
-                  f"{'outside' if outside else 'inside'} random cloud")
-
-    # ---- Centered vs uncentered ----
-    print(f"\n--- Centered vs Uncentered ---")
-    any_large = False
-    for key, res in sorted(all_results.items()):
-        u = res["agg_total"]["tr_M_Sigma"]
-        c = res["agg_total"]["tr_M_Sigma_c"]
-        diff_pct = abs(u - c) / abs(u) * 100 if abs(u) > 1e-20 else 0
-        if diff_pct > 1:
-            print(f"  {key}: uncentered={u:.4e}, centered={c:.4e}, diff={diff_pct:.1f}%")
-            any_large = True
-    if not any_large:
-        print(f"  All differences < 1% (mean-zero quantizer assumption confirmed)")
+    if ppl_data:
+        for k, v in sorted(ppl_data.items()):
+            print(f"  {k}: PPL={v['ppl']:.1f}")
+    else:
+        print("  No PPL reference files found.")
 
     # ---- Save ----
     output_data = {
         "model": args.model,
         "model_tag": model_tag,
+        "version": "v2_P0",
         "config": {
             "seq_len": args.seq_len,
             "n_chunks": args.n_chunks,
             "n_random_seeds": args.n_random_seeds,
+            "n_bootstrap": args.n_bootstrap,
+            "bits": args.bits,
             "num_layers": num_layers,
             "num_kv_heads": num_kv_heads,
             "head_dim": head_dim,
+            "n_total_configs": n_total,
         },
         "clean_loss": clean_loss,
         "chunk_losses": chunk_losses,
-        "bits": args.bits,
-        "metrics": {},
+
+        # === Flat config list (primary data for figures) ===
+        # Each entry: {mode, bits, key, linear_pred, tr_M_Sigma, tr_Sigma,
+        #              tr_M_Sigma_c, tr_Sigma_c, delta_loss, K/V splits}
+        "config_list": config_list,
+
+        # === Statistical analysis ===
+        "correlations": correlation_results,
+        "end_to_end_evidence": e2e_results,
+        "kv_breakdown": kv_breakdown,
+        "bias_drift": bias_drift_results,
+
+        # === Structured results (backward compat, includes per-layer/top-heads) ===
+        "metrics": {
+            key: {
+                "mode": res["mode"],
+                "bits": res["bits"],
+                "agg_K": res["agg_K"],
+                "agg_V": res["agg_V"],
+                "agg_total": res["agg_total"],
+                "delta_loss": res["delta_loss"],
+                "per_layer": res["per_layer"],
+                "top_heads": res["top_heads"],
+            }
+            for key, res in all_results.items()
+        },
+
         "ppl_reference": ppl_data,
     }
-
-    for key, res in all_results.items():
-        output_data["metrics"][key] = {
-            "mode": res["mode"],
-            "bits": res["bits"],
-            "agg_K": res["agg_K"],
-            "agg_V": res["agg_V"],
-            "agg_total": res["agg_total"],
-            "delta_loss": res["delta_loss"],
-            "per_layer": res["per_layer"],
-            "top_heads": res["top_heads"],
-        }
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     with open(args.output, "w") as f:
         json.dump(output_data, f, indent=2)
 
     print(f"\nSaved to {args.output}")
+    print(f"\nTotal runtime: {total_elapsed:.0f}s")
 
 
 if __name__ == "__main__":
