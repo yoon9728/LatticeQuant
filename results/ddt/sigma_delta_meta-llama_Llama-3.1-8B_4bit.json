@@ -1,0 +1,205 @@
+{
+  "model": "meta-llama/Llama-3.1-8B",
+  "bits": 4,
+  "summary": {
+    "model": "meta-llama/Llama-3.1-8B",
+    "bits": 4,
+    "mean_sigma2": 0.5331831926378072,
+    "max_sigma2": 1.857220847159624,
+    "catastrophic_layers": 1
+  },
+  "layers": [
+    {
+      "layer": 0,
+      "sigma2_delta": 0.28908137418329716,
+      "predicted_chi2": 0.33520037494799104,
+      "regime": "borderline"
+    },
+    {
+      "layer": 1,
+      "sigma2_delta": 0.25121876574121416,
+      "predicted_chi2": 0.28559129690320084,
+      "regime": "borderline"
+    },
+    {
+      "layer": 2,
+      "sigma2_delta": 0.5261708158068359,
+      "predicted_chi2": 0.6924392234205539,
+      "regime": "borderline"
+    },
+    {
+      "layer": 3,
+      "sigma2_delta": 0.6443525329232216,
+      "predicted_chi2": 0.9047533648433506,
+      "regime": "borderline"
+    },
+    {
+      "layer": 4,
+      "sigma2_delta": 0.50673040561378,
+      "predicted_chi2": 0.6598552596977787,
+      "regime": "borderline"
+    },
+    {
+      "layer": 5,
+      "sigma2_delta": 0.5049726264551282,
+      "predicted_chi2": 0.6569401635141476,
+      "regime": "borderline"
+    },
+    {
+      "layer": 6,
+      "sigma2_delta": 0.4847066253423691,
+      "predicted_chi2": 0.6236985869455498,
+      "regime": "borderline"
+    },
+    {
+      "layer": 7,
+      "sigma2_delta": 0.6603764574974775,
+      "predicted_chi2": 0.9355208385992091,
+      "regime": "borderline"
+    },
+    {
+      "layer": 8,
+      "sigma2_delta": 0.4004755658097565,
+      "predicted_chi2": 0.49253432718601897,
+      "regime": "borderline"
+    },
+    {
+      "layer": 9,
+      "sigma2_delta": 0.5158079182729125,
+      "predicted_chi2": 0.6749912112911609,
+      "regime": "borderline"
+    },
+    {
+      "layer": 10,
+      "sigma2_delta": 0.45270874071866274,
+      "predicted_chi2": 0.5725660953349772,
+      "regime": "borderline"
+    },
+    {
+      "layer": 11,
+      "sigma2_delta": 0.35551265301182866,
+      "predicted_chi2": 0.42691197753082566,
+      "regime": "borderline"
+    },
+    {
+      "layer": 12,
+      "sigma2_delta": 0.5530570540577173,
+      "predicted_chi2": 0.7385597734251315,
+      "regime": "borderline"
+    },
+    {
+      "layer": 13,
+      "sigma2_delta": 0.2640770305879414,
+      "predicted_chi2": 0.3022285038647561,
+      "regime": "borderline"
+    },
+    {
+      "layer": 14,
+      "sigma2_delta": 0.3515963973477483,
+      "predicted_chi2": 0.42133475346253246,
+      "regime": "borderline"
+    },
+    {
+      "layer": 15,
+      "sigma2_delta": 0.3787940382026136,
+      "predicted_chi2": 0.46052219298744745,
+      "regime": "borderline"
+    },
+    {
+      "layer": 16,
+      "sigma2_delta": 0.6466122260317206,
+      "predicted_chi2": 0.9090623895984828,
+      "regime": "borderline"
+    },
+    {
+      "layer": 17,
+      "sigma2_delta": 0.41016856534406543,
+      "predicted_chi2": 0.5070718037800155,
+      "regime": "borderline"
+    },
+    {
+      "layer": 18,
+      "sigma2_delta": 0.39385946094989777,
+      "predicted_chi2": 0.482692157884111,
+      "regime": "borderline"
+    },
+    {
+      "layer": 19,
+      "sigma2_delta": 0.43332393653690815,
+      "predicted_chi2": 0.5423757716509412,
+      "regime": "borderline"
+    },
+    {
+      "layer": 20,
+      "sigma2_delta": 0.3365386142395437,
+      "predicted_chi2": 0.4000929317499231,
+      "regime": "borderline"
+    },
+    {
+      "layer": 21,
+      "sigma2_delta": 0.512405906803906,
+      "predicted_chi2": 0.6693025539052564,
+      "regime": "borderline"
+    },
+    {
+      "layer": 22,
+      "sigma2_delta": 0.4186532599851489,
+      "predicted_chi2": 0.5199132486686693,
+      "regime": "borderline"
+    },
+    {
+      "layer": 23,
+      "sigma2_delta": 0.5180273931473494,
+      "predicted_chi2": 0.678712940814316,
+      "regime": "borderline"
+    },
+    {
+      "layer": 24,
+      "sigma2_delta": 0.5214255005121231,
+      "predicted_chi2": 0.6844270907708601,
+      "regime": "borderline"
+    },
+    {
+      "layer": 25,
+      "sigma2_delta": 0.9516400825232267,
+      "predicted_chi2": 1.5899539160525027,
+      "regime": "borderline"
+    },
+    {
+      "layer": 26,
+      "sigma2_delta": 0.4633487705141306,
+      "predicted_chi2": 0.5893875772825539,
+      "regime": "borderline"
+    },
+    {
+      "layer": 27,
+      "sigma2_delta": 0.5795819135382771,
+      "predicted_chi2": 0.7852918683367536,
+      "regime": "borderline"
+    },
+    {
+      "layer": 28,
+      "sigma2_delta": 0.4829705795273185,
+      "predicted_chi2": 0.6208822171895878,
+      "regime": "borderline"
+    },
+    {
+      "layer": 29,
+      "sigma2_delta": 1.857220847159624,
+      "predicted_chi2": 5.405909009647061,
+      "regime": "CATASTROPHIC"
+    },
+    {
+      "layer": 30,
+      "sigma2_delta": 0.5809012139216065,
+      "predicted_chi2": 0.7876487589645016,
+      "regime": "borderline"
+    },
+    {
+      "layer": 31,
+      "sigma2_delta": 0.8155448921024799,
+      "predicted_chi2": 1.2604070147755952,
+      "regime": "borderline"
+    }
+  ]
+}

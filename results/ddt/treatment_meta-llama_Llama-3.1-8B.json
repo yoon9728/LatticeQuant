@@ -1,0 +1,145 @@
+{
+  "model": "meta-llama/Llama-3.1-8B",
+  "clean_ppl": 5.799736584178129,
+  "baseline_ppl": 6.887357605997627,
+  "full_ppl": 6.780579023486763,
+  "avg_k_bits": 4.0,
+  "v_bits": 3,
+  "total_bits": 7.0,
+  "results": {
+    "1. Baseline: pt uniform K4, V4": 6.887357605997627,
+    "2. +per-channel K (free)": 6.125742661881986,
+    "3. +optimal K bits": 5.84522448197963,
+    "4. +V at 3-bit (contractive)": 6.780579023486763
+  },
+  "allocation": {
+    "0": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "1": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "2": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "3": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "4": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "5": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "6": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "7": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "8": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "9": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "10": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "11": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "12": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "13": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "14": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "15": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "16": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "17": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "18": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "19": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "20": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "21": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "22": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "23": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "24": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "25": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "26": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "27": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "28": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "29": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "30": {
+      "bits": 4,
+      "mode": "per_channel"
+    },
+    "31": {
+      "bits": 4,
+      "mode": "per_channel"
+    }
+  }
+}

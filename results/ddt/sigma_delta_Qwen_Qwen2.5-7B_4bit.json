@@ -1,0 +1,181 @@
+{
+  "model": "Qwen/Qwen2.5-7B",
+  "bits": 4,
+  "summary": {
+    "model": "Qwen/Qwen2.5-7B",
+    "bits": 4,
+    "mean_sigma2": 13.438651341412747,
+    "max_sigma2": 244.91202749311924,
+    "catastrophic_layers": 11
+  },
+  "layers": [
+    {
+      "layer": 0,
+      "sigma2_delta": 244.91202749311924,
+      "predicted_chi2": Infinity,
+      "regime": "CATASTROPHIC"
+    },
+    {
+      "layer": 1,
+      "sigma2_delta": 1.7814316973090172,
+      "predicted_chi2": 4.938352258352762,
+      "regime": "CATASTROPHIC"
+    },
+    {
+      "layer": 2,
+      "sigma2_delta": 2.534580077443804,
+      "predicted_chi2": 11.611134036348307,
+      "regime": "CATASTROPHIC"
+    },
+    {
+      "layer": 3,
+      "sigma2_delta": 4.170523085764477,
+      "predicted_chi2": 63.74931269436553,
+      "regime": "CATASTROPHIC"
+    },
+    {
+      "layer": 4,
+      "sigma2_delta": 0.7717612279312951,
+      "predicted_chi2": 1.1635734461187535,
+      "regime": "borderline"
+    },
+    {
+      "layer": 5,
+      "sigma2_delta": 1.4897588448865073,
+      "predicted_chi2": 3.4360256197412253,
+      "regime": "CATASTROPHIC"
+    },
+    {
+      "layer": 6,
+      "sigma2_delta": 1.4014991894364357,
+      "predicted_chi2": 3.061284039246609,
+      "regime": "CATASTROPHIC"
+    },
+    {
+      "layer": 7,
+      "sigma2_delta": 0.5628156885504723,
+      "predicted_chi2": 0.7556087950838823,
+      "regime": "borderline"
+    },
+    {
+      "layer": 8,
+      "sigma2_delta": 0.9292688497475216,
+      "predicted_chi2": 1.5326567478774895,
+      "regime": "borderline"
+    },
+    {
+      "layer": 9,
+      "sigma2_delta": 0.5643566814916474,
+      "predicted_chi2": 0.7583162614020382,
+      "regime": "borderline"
+    },
+    {
+      "layer": 10,
+      "sigma2_delta": 0.997664963560445,
+      "predicted_chi2": 1.711941946145354,
+      "regime": "borderline"
+    },
+    {
+      "layer": 11,
+      "sigma2_delta": 0.7987635497535978,
+      "predicted_chi2": 1.2227908583758524,
+      "regime": "borderline"
+    },
+    {
+      "layer": 12,
+      "sigma2_delta": 0.8494831515210015,
+      "predicted_chi2": 1.3384379214530293,
+      "regime": "borderline"
+    },
+    {
+      "layer": 13,
+      "sigma2_delta": 5.280042201280594,
+      "predicted_chi2": 195.378162586873,
+      "regime": "CATASTROPHIC"
+    },
+    {
+      "layer": 14,
+      "sigma2_delta": 0.6383754653590066,
+      "predicted_chi2": 0.8934024815794306,
+      "regime": "borderline"
+    },
+    {
+      "layer": 15,
+      "sigma2_delta": 2.4413248705012456,
+      "predicted_chi2": 10.488251109692886,
+      "regime": "CATASTROPHIC"
+    },
+    {
+      "layer": 16,
+      "sigma2_delta": 0.6347803260598864,
+      "predicted_chi2": 0.8866076573971822,
+      "regime": "borderline"
+    },
+    {
+      "layer": 17,
+      "sigma2_delta": 0.44565426984003614,
+      "predicted_chi2": 0.561511511575083,
+      "regime": "borderline"
+    },
+    {
+      "layer": 18,
+      "sigma2_delta": 1.5853220586265837,
+      "predicted_chi2": 3.880863049464306,
+      "regime": "CATASTROPHIC"
+    },
+    {
+      "layer": 19,
+      "sigma2_delta": 9.84029689856938,
+      "predicted_chi2": 18774.289549100697,
+      "regime": "CATASTROPHIC"
+    },
+    {
+      "layer": 20,
+      "sigma2_delta": 0.3413024012531553,
+      "predicted_chi2": 0.4067785881541206,
+      "regime": "borderline"
+    },
+    {
+      "layer": 21,
+      "sigma2_delta": 0.6812363288232258,
+      "predicted_chi2": 0.9763196033311048,
+      "regime": "borderline"
+    },
+    {
+      "layer": 22,
+      "sigma2_delta": 0.46947401762008667,
+      "predicted_chi2": 0.599152845750133,
+      "regime": "borderline"
+    },
+    {
+      "layer": 23,
+      "sigma2_delta": 0.7076000986354691,
+      "predicted_chi2": 1.0291157329800904,
+      "regime": "borderline"
+    },
+    {
+      "layer": 24,
+      "sigma2_delta": 0.9471431449055672,
+      "predicted_chi2": 1.5783332032529325,
+      "regime": "borderline"
+    },
+    {
+      "layer": 25,
+      "sigma2_delta": 0.916156741125243,
+      "predicted_chi2": 1.4996650455686185,
+      "regime": "borderline"
+    },
+    {
+      "layer": 26,
+      "sigma2_delta": 0.48409985644476755,
+      "predicted_chi2": 0.6227136759807996,
+      "regime": "borderline"
+    },
+    {
+      "layer": 27,
+      "sigma2_delta": 89.10549437999725,
+      "predicted_chi2": Infinity,
+      "regime": "CATASTROPHIC"
+    }
+  ]
+}

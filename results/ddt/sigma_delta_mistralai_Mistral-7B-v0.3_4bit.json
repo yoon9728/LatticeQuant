@@ -1,0 +1,205 @@
+{
+  "model": "mistralai/Mistral-7B-v0.3",
+  "bits": 4,
+  "summary": {
+    "model": "mistralai/Mistral-7B-v0.3",
+    "bits": 4,
+    "mean_sigma2": 0.34464922473307524,
+    "max_sigma2": 0.6310140760615468,
+    "catastrophic_layers": 0
+  },
+  "layers": [
+    {
+      "layer": 0,
+      "sigma2_delta": 0.09908290981547907,
+      "predicted_chi2": 0.10415784128685646,
+      "regime": "safe"
+    },
+    {
+      "layer": 1,
+      "sigma2_delta": 0.12017404846847057,
+      "predicted_chi2": 0.12769310775814668,
+      "regime": "borderline"
+    },
+    {
+      "layer": 2,
+      "sigma2_delta": 0.44207129161804914,
+      "predicted_chi2": 0.5559266610094362,
+      "regime": "borderline"
+    },
+    {
+      "layer": 3,
+      "sigma2_delta": 0.2556640962138772,
+      "predicted_chi2": 0.29131889617459983,
+      "regime": "borderline"
+    },
+    {
+      "layer": 4,
+      "sigma2_delta": 0.2787437834776938,
+      "predicted_chi2": 0.3214687183713103,
+      "regime": "borderline"
+    },
+    {
+      "layer": 5,
+      "sigma2_delta": 0.3331158980727196,
+      "predicted_chi2": 0.39530900272328084,
+      "regime": "borderline"
+    },
+    {
+      "layer": 6,
+      "sigma2_delta": 0.48985113576054573,
+      "predicted_chi2": 0.6320732445283712,
+      "regime": "borderline"
+    },
+    {
+      "layer": 7,
+      "sigma2_delta": 0.38051142264157534,
+      "predicted_chi2": 0.4630326261468394,
+      "regime": "borderline"
+    },
+    {
+      "layer": 8,
+      "sigma2_delta": 0.36488922126591206,
+      "predicted_chi2": 0.4403544386695739,
+      "regime": "borderline"
+    },
+    {
+      "layer": 9,
+      "sigma2_delta": 0.1908045040909201,
+      "predicted_chi2": 0.21022283533986652,
+      "regime": "borderline"
+    },
+    {
+      "layer": 10,
+      "sigma2_delta": 0.38816786278039217,
+      "predicted_chi2": 0.47427723979481673,
+      "regime": "borderline"
+    },
+    {
+      "layer": 11,
+      "sigma2_delta": 0.22719862638041377,
+      "predicted_chi2": 0.2550791350096717,
+      "regime": "borderline"
+    },
+    {
+      "layer": 12,
+      "sigma2_delta": 0.31089389882981777,
+      "predicted_chi2": 0.36464442313449874,
+      "regime": "borderline"
+    },
+    {
+      "layer": 13,
+      "sigma2_delta": 0.3923988351598382,
+      "predicted_chi2": 0.4805280803180807,
+      "regime": "borderline"
+    },
+    {
+      "layer": 14,
+      "sigma2_delta": 0.2038475964218378,
+      "predicted_chi2": 0.22611127547052878,
+      "regime": "borderline"
+    },
+    {
+      "layer": 15,
+      "sigma2_delta": 0.23776127956807613,
+      "predicted_chi2": 0.26840636216578484,
+      "regime": "borderline"
+    },
+    {
+      "layer": 16,
+      "sigma2_delta": 0.27814117912203074,
+      "predicted_chi2": 0.32067263545135516,
+      "regime": "borderline"
+    },
+    {
+      "layer": 17,
+      "sigma2_delta": 0.3872415367513895,
+      "predicted_chi2": 0.47291221074220813,
+      "regime": "borderline"
+    },
+    {
+      "layer": 18,
+      "sigma2_delta": 0.36628911131992936,
+      "predicted_chi2": 0.44237218850697757,
+      "regime": "borderline"
+    },
+    {
+      "layer": 19,
+      "sigma2_delta": 0.43982235761359334,
+      "predicted_chi2": 0.5524314163934474,
+      "regime": "borderline"
+    },
+    {
+      "layer": 20,
+      "sigma2_delta": 0.3107042727060616,
+      "predicted_chi2": 0.36438567543567113,
+      "regime": "borderline"
+    },
+    {
+      "layer": 21,
+      "sigma2_delta": 0.6011572303250432,
+      "predicted_chi2": 0.8242286320672967,
+      "regime": "borderline"
+    },
+    {
+      "layer": 22,
+      "sigma2_delta": 0.3861658703535795,
+      "predicted_chi2": 0.4713287003873128,
+      "regime": "borderline"
+    },
+    {
+      "layer": 23,
+      "sigma2_delta": 0.41814440209418535,
+      "predicted_chi2": 0.5191400255655276,
+      "regime": "borderline"
+    },
+    {
+      "layer": 24,
+      "sigma2_delta": 0.4278087606653571,
+      "predicted_chi2": 0.533892712294946,
+      "regime": "borderline"
+    },
+    {
+      "layer": 25,
+      "sigma2_delta": 0.2535015749745071,
+      "predicted_chi2": 0.28852940888466394,
+      "regime": "borderline"
+    },
+    {
+      "layer": 26,
+      "sigma2_delta": 0.2624140824191272,
+      "predicted_chi2": 0.3000647649503423,
+      "regime": "borderline"
+    },
+    {
+      "layer": 27,
+      "sigma2_delta": 0.46200035978108644,
+      "predicted_chi2": 0.5872458742865383,
+      "regime": "borderline"
+    },
+    {
+      "layer": 28,
+      "sigma2_delta": 0.2935024364851415,
+      "predicted_chi2": 0.3411164470164909,
+      "regime": "borderline"
+    },
+    {
+      "layer": 29,
+      "sigma2_delta": 0.6310140760615468,
+      "predicted_chi2": 0.8795155849527638,
+      "regime": "borderline"
+    },
+    {
+      "layer": 30,
+      "sigma2_delta": 0.39121117256581783,
+      "predicted_chi2": 0.4787707562582808,
+      "regime": "borderline"
+    },
+    {
+      "layer": 31,
+      "sigma2_delta": 0.4044803576543927,
+      "predicted_chi2": 0.498523601380757,
+      "regime": "borderline"
+    }
+  ]
+}
