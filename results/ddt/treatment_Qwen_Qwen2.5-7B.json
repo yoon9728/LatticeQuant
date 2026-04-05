@@ -1,16 +1,16 @@
 {
   "model": "Qwen/Qwen2.5-7B",
-  "clean_ppl": 9.340642126143496,
-  "baseline_ppl": 17154.228809290984,
-  "full_ppl": 12.767144052939209,
+  "clean_ppl": 5.84522448197963,
+  "baseline_ppl": 26568.989329532407,
+  "full_ppl": 15.642631884188171,
   "avg_k_bits": 4.214285714285714,
   "v_bits": 3,
   "total_bits": 7.214285714285714,
   "results": {
-    "1. Baseline: pt uniform K4, V4": 17154.228809290984,
-    "2. +per-channel K (free)": 11.444393964331121,
-    "3. +optimal K bits": 10.42023928423861,
-    "4. +V at 3-bit (contractive)": 12.767144052939209
+    "1. Baseline: pt uniform K4, V4": 26568.989329532407,
+    "2. +per-channel K (free)": 14.694892728788941,
+    "3. +optimal K bits": 11.092286978670202,
+    "4. +V at 3-bit (contractive)": 15.642631884188171
   },
   "allocation": {
     "0": {

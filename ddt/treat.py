@@ -1,138 +1,236 @@
 """
-Cause-Specific Treatment Pipeline
-==================================
-Optimal treatment = cheapest treatments first, then bit allocation on residual.
-
-Pipeline:
-  1. Diagnose: measure σ²_eff per layer under per-token 4-bit
-  2. Apply free treatment: per-channel K quantization
-  3. Re-diagnose: measure σ²_eff under per-channel
-  4. Allocate K bits on residual σ²_eff only
-  5. V at 3-bit everywhere (contractive, proven safe by Thm 2)
-  6. Evaluate all combinations
-
+Architecture-Agnostic Treatment Pipeline
+=========================================
 Usage:
   python -m ddt.treat --model Qwen/Qwen2.5-7B
-  python -m ddt.treat --model meta-llama/Llama-3.1-8B
+  python -m ddt.treat --model Qwen/Qwen2.5-7B --corpus c4
+  python -m ddt.treat --model Qwen/Qwen2.5-7B --corpus ptb
+  python -m ddt.treat --model tiiuae/falcon-7b
 """
 
-import argparse
-import json
-import os
-
+import argparse, json, os
 import numpy as np
 import torch
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
-def quantize_uniform(x, bits=4, mode='per_token'):
-    """Symmetric uniform quantization.
-    mode='per_token':   one scale per token (dim=-1)
-    mode='per_channel': one scale per dimension (dim=-2)
-    """
+def load_model(model_name):
+    kwargs = dict(dtype=torch.bfloat16, device_map="auto",
+                  attn_implementation="eager")
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, trust_remote_code=False, **kwargs)
+    except Exception:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, trust_remote_code=True, **kwargs)
+    try:
+        tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=False)
+    except Exception:
+        tok = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    model.eval()
+    return model, tok
+
+
+def load_text(corpus, tokenizer, seq_len, device):
+    from datasets import load_dataset
+    if corpus == "wikitext":
+        ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+        text = "\n\n".join(ds["text"])
+    elif corpus == "c4":
+        ds = load_dataset("allenai/c4", "en", split="validation", streaming=True)
+        text = "\n\n".join(x["text"] for x, _ in zip(ds, range(200)))
+    elif corpus == "ptb":
+        ds = load_dataset("ptb-text-only/ptb_text_only", split="test")
+        text = "\n\n".join(ds["sentence"])
+    else:
+        raise ValueError(f"Unknown corpus: {corpus}")
+    input_ids = tokenizer(text, return_tensors="pt",
+                          truncation=True, max_length=seq_len).input_ids.to(device)
+    return input_ids
+
+
+def get_layers(model):
+    if hasattr(model, 'model') and hasattr(model.model, 'layers'):
+        return model.model.layers
+    if hasattr(model, 'model') and hasattr(model.model, 'language_model'):
+        return model.model.language_model.layers
+    if hasattr(model, 'transformer') and hasattr(model.transformer, 'h'):
+        return model.transformer.h
+    for _, mod in model.named_modules():
+        if isinstance(mod, torch.nn.ModuleList) and len(mod) > 10:
+            return mod
+    raise ValueError(f"Cannot find layers in {type(model).__name__}")
+
+
+def get_attn(layer):
+    for name in ['self_attn', 'self_attention', 'attention', 'attn']:
+        if hasattr(layer, name):
+            return getattr(layer, name)
+    raise ValueError(f"Cannot find attn in {type(layer).__name__}: "
+                     f"{[n for n, _ in layer.named_children()]}")
+
+
+def get_config(model):
+    cfg = model.config
+    if hasattr(cfg, 'text_config'):
+        cfg = cfg.text_config
+    nh = getattr(cfg, 'num_attention_heads', None)
+    nkv = getattr(cfg, 'num_key_value_heads', None)
+    if nkv is None:
+        if getattr(cfg, 'multi_query', False):
+            nkv = 1
+        elif getattr(cfg, 'num_kv_heads', None):
+            nkv = cfg.num_kv_heads
+        else:
+            nkv = nh
+    hd = getattr(cfg, 'head_dim', None)
+    if hd is None:
+        hd = getattr(cfg, 'hidden_size', 0) // max(nh, 1)
+    return nh, nkv, hd
+
+
+def find_proj(attn):
+    if hasattr(attn, 'k_proj'):
+        return attn.q_proj, attn.k_proj, attn.v_proj, 'separate'
+    for name in ['qkv_proj', 'query_key_value', 'c_attn']:
+        if hasattr(attn, name):
+            return getattr(attn, name), None, None, 'fused'
+    raise ValueError(f"Unknown proj in {type(attn).__name__}: "
+                     f"{[n for n, _ in attn.named_children()]}")
+
+
+def quantize(x, bits=4, mode='per_token'):
     if mode == 'per_channel':
         scale = x.abs().amax(dim=-2, keepdim=True).clamp(min=1e-10)
     else:
         scale = x.abs().amax(dim=-1, keepdim=True).clamp(min=1e-10)
-    max_val = 2 ** (bits - 1) - 1
-    return (x / scale * max_val).round().clamp(-max_val, max_val) * scale / max_val
+    mv = 2 ** (bits - 1) - 1
+    return (x / scale * mv).round().clamp(-mv, mv) * scale / mv
 
 
 def measure_sigma2(model, input_ids, bits=4, quant_mode='per_token'):
-    """Measure σ²_eff per layer under given quantization mode."""
-    n_layers = len(model.model.layers)
-    attn0 = model.model.layers[0].self_attn
-    n_heads = attn0.config.num_attention_heads
-    n_kv_heads = attn0.config.num_key_value_heads
-    head_dim = attn0.head_dim
-    heads_per_kv = n_heads // n_kv_heads
-    T = input_ids.shape[1]
+    layers = get_layers(model)
+    nl = len(layers)
+    nh, nkv, hd = get_config(model)
+    hpk = nh // nkv
+    q_dim, k_dim = nh * hd, nkv * hd
 
     captures = {}
     hooks = []
-    for idx, layer in enumerate(model.model.layers):
-        attn = layer.self_attn
-        def make_hook(li, name):
-            def hook(module, input, output):
-                if li not in captures:
-                    captures[li] = {}
-                captures[li][name] = output.detach().float()
-            return hook
-        hooks.append(attn.q_proj.register_forward_hook(make_hook(idx, 'q')))
-        hooks.append(attn.k_proj.register_forward_hook(make_hook(idx, 'k')))
+    for idx in range(nl):
+        attn = get_attn(layers[idx])
+        q_mod, k_mod, _, style = find_proj(attn)
+        if style == 'separate':
+            def mh(li, nm):
+                def hook(m, i, o):
+                    if li not in captures: captures[li] = {}
+                    captures[li][nm] = o.detach().float()
+                return hook
+            hooks.append(q_mod.register_forward_hook(mh(idx, 'q')))
+            hooks.append(k_mod.register_forward_hook(mh(idx, 'k')))
+        else:
+            def mfh(li, qd, kd):
+                def hook(m, i, o):
+                    if li not in captures: captures[li] = {}
+                    flat = o.reshape(-1, o.shape[-1])
+                    captures[li]['q'] = flat[:, :qd].detach().float()
+                    captures[li]['k'] = flat[:, qd:qd+kd].detach().float()
+                return hook
+            hooks.append(q_mod.register_forward_hook(mfh(idx, q_dim, k_dim)))
 
     with torch.no_grad():
         out = model(input_ids, use_cache=False, output_attentions=True)
     for h in hooks:
         h.remove()
 
+    aw = out.attentions if hasattr(out, 'attentions') and out.attentions else None
+
     results = []
-    for li in range(n_layers):
-        q_raw = captures[li]['q'].squeeze(0)
-        k_raw = captures[li]['k'].squeeze(0)
-        k_q = quantize_uniform(k_raw.unsqueeze(0), bits, mode=quant_mode).squeeze(0)
+    for li in range(nl):
+        if li not in captures:
+            results.append({'layer': li, 'sigma2_eff': 0.0, 'q_norm': 0.0,
+                           'noise_factor': 0.0})
+            continue
+        q_raw = captures[li]['q'].reshape(-1, q_dim)
+        k_raw = captures[li]['k'].reshape(-1, k_dim)
+        T_l = q_raw.shape[0]
+        k_q = quantize(k_raw.unsqueeze(0), bits, mode=quant_mode).squeeze(0)
         dk = k_q - k_raw
+        qh = q_raw.view(T_l, nh, hd)
+        dkh = dk.view(T_l, nkv, hd)
 
-        q_heads = q_raw.view(T, n_heads, head_dim)
-        dk_heads = dk.view(T, n_kv_heads, head_dim)
+        s2l = []
+        for kh in range(nkv):
+            dh = dkh[:, kh, :]
+            for qi in range(kh * hpk, min((kh+1) * hpk, nh)):
+                d = (qh[:, qi, :] @ dh.T) / (hd ** 0.5)
+                s2l.append(d.var(dim=-1).mean().item())
+        s2a = np.mean(s2l)
 
-        sigma2_list = []
-        for kv_h in range(n_kv_heads):
-            q_start = kv_h * heads_per_kv
-            dk_h = dk_heads[:, kv_h, :]
-            for q_h in range(q_start, min(q_start + heads_per_kv, n_heads)):
-                q_h_vec = q_heads[:, q_h, :]
-                delta = (q_h_vec @ dk_h.T) / (head_dim ** 0.5)
-                sigma2_list.append(delta.var(dim=-1).mean().item())
-
-        sigma2_avg = np.mean(sigma2_list)
-        A = out.attentions[li].squeeze(0).float()
-        eta_V = (A ** 2).sum(dim=-1).mean().item()
-        n_eff = 1.0 / max(eta_V, 1e-10)
-        s2_eff = sigma2_avg * max(1.0 - 1.0 / n_eff, 0.0)
-
-        q_norm = (q_raw.view(T, n_heads, head_dim) ** 2).sum(dim=-1).mean().item() / head_dim
-
-        results.append({
-            'layer': li, 'sigma2_eff': s2_eff, 'q_norm': q_norm,
-            'noise_factor': sigma2_avg / max(q_norm, 1e-10),
-        })
+        ne = T_l
+        if aw and li < len(aw) and aw[li] is not None:
+            A = aw[li].squeeze(0).float()
+            eta = (A ** 2).sum(dim=-1).mean().item()
+            ne = 1.0 / max(eta, 1e-10)
+        s2e = s2a * max(1.0 - 1.0/ne, 0.0)
+        qn = (qh ** 2).sum(dim=-1).mean().item() / hd
+        results.append({'layer': li, 'sigma2_eff': s2e, 'q_norm': qn,
+                       'noise_factor': s2a / max(qn, 1e-10)})
     return results
 
 
-def compute_optimal_bits(sigma2_eff, target=0.5, b_min=2, b_max=8):
-    if sigma2_eff <= target:
-        return 4
-    b = int(np.ceil(4 + np.log2(sigma2_eff / target) / 2))
-    return max(b_min, min(b_max, b))
+def opt_bits(s2, target=0.5):
+    if s2 <= target: return 4
+    return max(2, min(8, int(np.ceil(4 + np.log2(s2/target)/2))))
 
 
-def evaluate(model, input_ids, k_config, v_bits=None):
-    """k_config: {layer: (bits, mode)} for K. v_bits: int or None."""
-    n_layers = len(model.model.layers)
+def evaluate(model, input_ids, k_cfg, v_bits=None):
+    layers = get_layers(model)
+    nl = len(layers)
+    nh, nkv, hd = get_config(model)
+    q_dim, k_dim, v_dim = nh*hd, nkv*hd, nkv*hd
     hooks = []
-    for idx, layer in enumerate(model.model.layers):
-        attn = layer.self_attn
-        if idx in k_config:
-            kb, km = k_config[idx]
-            def make_k_hook(bits, mode):
-                def hook(mod, inp, out):
-                    return quantize_uniform(out, bits, mode=mode)
-                return hook
-            hooks.append(attn.k_proj.register_forward_hook(make_k_hook(kb, km)))
-        if v_bits is not None:
-            def make_v_hook(bits):
-                def hook(mod, inp, out):
-                    return quantize_uniform(out, bits, mode='per_token')
-                return hook
-            hooks.append(attn.v_proj.register_forward_hook(make_v_hook(v_bits)))
+    for idx in range(nl):
+        attn = get_attn(layers[idx])
+        q_mod, k_mod, v_mod, style = find_proj(attn)
+        if style == 'separate':
+            if idx in k_cfg:
+                kb, km = k_cfg[idx]
+                def mk(b, m):
+                    def hook(mod, i, o): return quantize(o, b, mode=m)
+                    return hook
+                hooks.append(k_mod.register_forward_hook(mk(kb, km)))
+            if v_bits is not None:
+                def mv(b):
+                    def hook(mod, i, o): return quantize(o, b)
+                    return hook
+                hooks.append(v_mod.register_forward_hook(mv(v_bits)))
+        else:
+            if idx in k_cfg or v_bits is not None:
+                kb = k_cfg[idx][0] if idx in k_cfg else 4
+                km = k_cfg[idx][1] if idx in k_cfg else 'per_token'
+                vb = v_bits
+                def mf(qd, kd, vd, k_b, k_m, v_b):
+                    def hook(mod, i, o):
+                        s = o.shape
+                        f = o.reshape(-1, s[-1])
+                        q = f[:, :qd]
+                        k = quantize(f[:, qd:qd+kd], k_b, mode=k_m)
+                        v = f[:, qd+kd:qd+kd+vd]
+                        if v_b is not None:
+                            v = quantize(v, v_b)
+                        return torch.cat([q, k, v], dim=-1).view(s)
+                    return hook
+                hooks.append(q_mod.register_forward_hook(
+                    mf(q_dim, k_dim, v_dim, kb, km, vb)))
 
     with torch.no_grad():
         out = model(input_ids, use_cache=False)
     for h in hooks:
         h.remove()
-
     logits = out.logits
     sl = logits[:, :-1, :].contiguous()
     lab = input_ids[:, 1:].contiguous()
@@ -140,178 +238,100 @@ def evaluate(model, input_ids, k_config, v_bits=None):
     return np.exp(loss) if loss < 20 else float('inf')
 
 
-def run_treatment(model_name, seq_len=512, target_sigma2=0.5,
-                  output_dir="results/ddt"):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
+def run_treatment(model_name, seq_len=512, target=0.5,
+                  output_dir="results/ddt", corpus="wikitext"):
     print(f"\n{'='*70}")
-    print(f"  Cause-Specific Treatment Pipeline")
-    print(f"  Model: {model_name}")
-    print(f"  Target σ²_eff: {target_sigma2}")
+    print(f"  Treatment: {model_name} [{corpus}]")
     print(f"{'='*70}")
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name, dtype=torch.bfloat16, device_map="auto",
-        attn_implementation="eager")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    model.eval()
-    n_layers = len(model.model.layers)
+    model, tok = load_model(model_name)
+    layers = get_layers(model)
+    nl = len(layers)
+    nh, nkv, hd = get_config(model)
+    _, _, _, style = find_proj(get_attn(layers[0]))
+    print(f"  L={nl}, {nh}Q/{nkv}KV, d={hd}, proj={style}")
 
-    from datasets import load_dataset
-    ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
-    text = "\n\n".join(ds["text"])
-    input_ids = tokenizer(text, return_tensors="pt",
-                          truncation=True, max_length=seq_len).input_ids.to(device)
+    device = next(model.parameters()).device
+    input_ids = load_text(corpus, tok, seq_len, device)
+    T = input_ids.shape[1]
+    print(f"  T={T}, corpus={corpus}")
 
-    # ====================================
-    # Phase 1-2: Diagnose under both modes
-    # ====================================
-    print(f"\n  Phase 1: Diagnosing...")
-    diag_pt = measure_sigma2(model, input_ids, bits=4, quant_mode='per_token')
-    diag_pc = measure_sigma2(model, input_ids, bits=4, quant_mode='per_channel')
+    print(f"\n  Diagnosing...")
+    d_pt = measure_sigma2(model, input_ids, 4, 'per_token')
+    d_pc = measure_sigma2(model, input_ids, 4, 'per_channel')
 
-    print(f"\n  {'L':>3} {'σ²_pt':>8} {'σ²_pc':>8} {'reduc':>7} {'status':>6}")
-    print(f"  {'-'*40}")
-    for li in range(n_layers):
-        s_pt = diag_pt[li]['sigma2_eff']
-        s_pc = diag_pc[li]['sigma2_eff']
-        red = s_pt / max(s_pc, 1e-10) if s_pc > 0.001 else float('inf')
-        st = "CRIT" if s_pc > 1.0 else ("MOD" if s_pc > 0.1 else "safe")
-        if s_pt > 0.3 or s_pc > 0.3:
-            print(f"  {li:3d} {s_pt:8.2f} {s_pc:8.2f} {red:6.1f}× {st:>6}")
+    print(f"\n  {'L':>3} {'s2_pt':>8} {'s2_pc':>8} {'red':>6} {'st':>4}")
+    print(f"  {'-'*35}")
+    for li in range(nl):
+        sp = d_pt[li]['sigma2_eff']
+        sc = d_pc[li]['sigma2_eff']
+        r = sp / max(sc, 1e-10) if sc > 0.001 else float('inf')
+        st = "CRIT" if sc > 1 else ("MOD" if sc > 0.1 else "safe")
+        if sp > 0.3 or sc > 0.3:
+            print(f"  {li:3d} {sp:8.2f} {sc:8.2f} {r:5.1f}x {st:>4}")
 
-    crit_pt = sum(1 for r in diag_pt if r['sigma2_eff'] > 1.0)
-    crit_pc = sum(1 for r in diag_pc if r['sigma2_eff'] > 1.0)
-    print(f"\n  CRITICAL: {crit_pt} (per-token) → {crit_pc} (per-channel)")
+    cpt = sum(1 for r in d_pt if r['sigma2_eff'] > 1)
+    cpc = sum(1 for r in d_pc if r['sigma2_eff'] > 1)
+    print(f"\n  CRITICAL: {cpt} (pt) -> {cpc} (pc)")
 
-    # ====================================
-    # Phase 3: Prescribe per-layer treatment
-    # ====================================
-    print(f"\n  Phase 2: Prescribing...")
+    alloc = {li: (opt_bits(d_pc[li]['sigma2_eff'], target), 'per_channel')
+             for li in range(nl)}
+    avg_k = np.mean([b for b, _ in alloc.values()])
 
-    # Treatment A: per-token + optimal bits
-    alloc_A = {li: (compute_optimal_bits(diag_pt[li]['sigma2_eff'], target_sigma2),
-                    'per_token') for li in range(n_layers)}
-    avg_A = np.mean([b for b, m in alloc_A.values()])
+    print(f"\n  Evaluating...")
+    clean = evaluate(model, input_ids, {})
+    if clean > 10000:
+        print(f"  X Clean PPL={clean:.0f} -- model not suitable")
+        return
 
-    # Treatment B: per-channel + optimal bits (stacked)
-    alloc_B = {li: (compute_optimal_bits(diag_pc[li]['sigma2_eff'], target_sigma2),
-                    'per_channel') for li in range(n_layers)}
-    avg_B = np.mean([b for b, m in alloc_B.values()])
+    u_pt = {l: (4, 'per_token') for l in range(nl)}
+    u_pc = {l: (4, 'per_channel') for l in range(nl)}
+    c1 = evaluate(model, input_ids, u_pt, 4)
+    c2 = evaluate(model, input_ids, u_pc, 4)
+    c3 = evaluate(model, input_ids, alloc)
 
-    print(f"    Treatment A (per-token + opt):   avg K = {avg_A:.2f}bit")
-    print(f"    Treatment B (per-channel + opt):  avg K = {avg_B:.2f}bit")
-    print(f"    Per-channel saves: {avg_A - avg_B:.2f} K bits/layer")
+    print(f"\n  {'':40s} {'PPL':>10s} {'K avg':>6s}")
+    print(f"  {'-'*58}")
+    print(f"  {'Clean':40s} {clean:10.2f}")
+    print(f"  {'Per-token K4 + V4':40s} {c1:10.2f} {'4.00':>6s}")
+    print(f"  {'Per-channel K4 + V4':40s} {c2:10.2f} {'4.00':>6s}")
+    print(f"  {'Per-channel + optimal K':40s} {c3:10.2f} {avg_k:6.2f}")
 
-    print(f"\n  Per-layer prescription:")
-    for li in range(n_layers):
-        b_a = alloc_A[li][0]
-        b_b = alloc_B[li][0]
-        s_pt = diag_pt[li]['sigma2_eff']
-        s_pc = diag_pc[li]['sigma2_eff']
-        if b_a != 4 or b_b != 4:
-            save = b_a - b_b
-            save_s = f" [{save}bit saved]" if save > 0 else ""
-            print(f"    L{li:2d}: per-token→{b_a}bit, per-channel→{b_b}bit  "
-                  f"(σ²: {s_pt:.1f}→{s_pc:.1f}){save_s}")
-
-    # ====================================
-    # Phase 4: Evaluate progressively
-    # ====================================
-    print(f"\n  Phase 3: Evaluating (progressive improvement)...\n")
-
-    clean = evaluate(model, input_ids, {}, v_bits=None)
-
-    # Build conditions progressively
-    uni_pt4 = {l: (4, 'per_token') for l in range(n_layers)}
-    uni_pc4 = {l: (4, 'per_channel') for l in range(n_layers)}
-
-    results = {}
-
-    conditions = [
-        ("1. Baseline: pt uniform K4, V4",    uni_pt4, 4, 4.0, 4.0),
-        ("2. +per-channel K (free)",          uni_pc4, 4, 4.0, 4.0),
-        ("3. +optimal K bits",               alloc_B, None, avg_B, None),
-        ("4. +V at 3-bit (contractive)",     alloc_B, 3, avg_B, 3.0),
-    ]
-
-    print(f"    {'Step':40s} {'PPL':>8s} {'K avg':>6s} {'V':>4s} {'K+V':>6s}")
-    print(f"    {'-'*68}")
-    print(f"    {'Clean':40s} {clean:8.2f} {'—':>6s} {'—':>4s} {'—':>6s}")
-
-    prev_ppl = None
-    for name, k_cfg, v_b, k_avg, v_avg in conditions:
-        ppl = evaluate(model, input_ids, k_cfg, v_bits=v_b)
-        total = (k_avg + (v_avg if v_avg else 0))
-        v_str = f"{v_b}" if v_b else "—"
-        total_str = f"{total:.1f}" if v_avg else "—"
-        delta = ""
-        if prev_ppl and ppl < prev_ppl:
-            delta = f"  ↓{(1-ppl/prev_ppl)*100:.0f}%"
-        elif prev_ppl and ppl >= prev_ppl:
-            delta = f"  ={ppl/prev_ppl:.2f}×"
-        print(f"    {name:40s} {ppl:8.2f} {k_avg:6.2f} {v_str:>4s} {total_str:>6s}{delta}")
-        results[name] = ppl
-        prev_ppl = ppl
-
-    # ====================================
-    # Summary
-    # ====================================
-    baseline_ppl = results["1. Baseline: pt uniform K4, V4"]
-    full_ppl = results["4. +V at 3-bit (contractive)"]
-
-    print(f"\n  {'='*65}")
-    print(f"  TREATMENT SUMMARY")
-    print(f"  {'='*65}")
-    print(f"  Clean:              {clean:.2f}")
-    print(f"  Before treatment:   {baseline_ppl:.2f}  (K4+V4 = 8 bits/dim)")
-    print(f"  After treatment:    {full_ppl:.2f}  (K{avg_B:.1f}+V3 = {avg_B+3:.1f} bits/dim)")
-    print(f"")
-
-    if baseline_ppl > 100:
-        print(f"  PPL improvement:    {baseline_ppl:.0f} → {full_ppl:.2f} "
-              f"({baseline_ppl/full_ppl:.0f}× better)")
+    best = min(c2, c3)
+    print(f"\n  {'='*58}")
+    print(f"  Clean: {clean:.2f}")
+    print(f"  Best:  {best:.2f}")
+    if c1 > 100:
+        print(f"  Recovery: {c1:.0f} -> {best:.2f} ({c1/best:.0f}x)")
     else:
-        print(f"  PPL improvement:    {baseline_ppl:.2f} → {full_ppl:.2f} "
-              f"({(1-full_ppl/baseline_ppl)*100:.1f}% better)")
-    print(f"  Memory savings:     {(1-(avg_B+3)/8)*100:.1f}% vs uniform K4+V4")
-    print(f"  Quality overhead:   +{(full_ppl/clean-1)*100:.1f}% vs clean")
-    print(f"")
-    print(f"  Treatment stack (each step's contribution):")
-    r = list(results.values())
-    print(f"    Per-channel (free):     {r[0]:.1f} → {r[1]:.1f}")
-    print(f"    Optimal K bits:         {r[1]:.1f} → {r[2]:.1f}")
-    print(f"    V 3-bit (safe):         {r[2]:.1f} → {r[3]:.1f}")
-    print(f"  {'='*65}")
+        print(f"  Improvement: {c1:.2f} -> {best:.2f} "
+              f"({(1-best/c1)*100:.1f}% better)")
+    print(f"  vs Clean: +{(best/clean-1)*100:.1f}%")
+    print(f"  {'='*58}")
 
-    # Save
     os.makedirs(output_dir, exist_ok=True)
     tag = model_name.replace("/", "_")
-    path = os.path.join(output_dir, f"treatment_{tag}.json")
-    save = {
-        'model': model_name, 'clean_ppl': clean,
-        'baseline_ppl': baseline_ppl, 'full_ppl': full_ppl,
-        'avg_k_bits': avg_B, 'v_bits': 3,
-        'total_bits': avg_B + 3,
-        'results': {k: v for k, v in results.items()},
-        'allocation': {str(l): {'bits': alloc_B[l][0], 'mode': alloc_B[l][1]}
-                      for l in range(n_layers)},
-    }
-    with open(path, 'w') as f:
+    save = {'model': model_name, 'corpus': corpus, 'clean': clean,
+            'pt_k4_v4': c1, 'pc_k4_v4': c2, 'pc_opt_k': c3,
+            'avg_k': avg_k, 'crit_pt': cpt, 'crit_pc': cpc,
+            'sigma2_pt': {str(r['layer']): r['sigma2_eff'] for r in d_pt},
+            'sigma2_pc': {str(r['layer']): r['sigma2_eff'] for r in d_pc}}
+    with open(os.path.join(output_dir,
+              f"treatment_{tag}_{corpus}.json"), 'w') as f:
         json.dump(save, f, indent=2)
-    print(f"\nSaved: {path}")
+    print(f"  Saved.")
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model", type=str, required=True)
-    parser.add_argument("--seq-len", type=int, default=512)
-    parser.add_argument("--target-sigma2", type=float, default=0.5)
-    parser.add_argument("--output-dir", type=str, default="results/ddt")
-    args = parser.parse_args()
-    run_treatment(args.model, args.seq_len, args.target_sigma2, args.output_dir)
+    p = argparse.ArgumentParser()
+    p.add_argument("--model", required=True)
+    p.add_argument("--seq-len", type=int, default=512)
+    p.add_argument("--target-sigma2", type=float, default=0.5)
+    p.add_argument("--output-dir", default="results/ddt")
+    p.add_argument("--corpus", default="wikitext",
+                   choices=["wikitext", "c4", "ptb"])
+    a = p.parse_args()
+    run_treatment(a.model, a.seq_len, a.target_sigma2, a.output_dir, a.corpus)
 
 
 if __name__ == "__main__":
